@@ -6,6 +6,7 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
+RUN node scripts/build-migration.mjs
 
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -14,6 +15,8 @@ RUN addgroup -S app && adduser -S app -G app
 COPY --from=build --chown=app:app /app/.next/standalone ./
 COPY --from=build --chown=app:app /app/.next/static ./.next/static
 COPY --from=build --chown=app:app /app/public ./public
+COPY --from=build --chown=app:app /app/.next/migration/migrate.cjs ./scripts/migrate.cjs
+COPY --from=build --chown=app:app /app/drizzle ./drizzle
 USER app
 EXPOSE 3000
 CMD ["node", "server.js"]
