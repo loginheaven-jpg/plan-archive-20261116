@@ -1,5 +1,5 @@
 import {
-  addDaysISO, expandEvents, floatingDate, floatingRecurrenceRule,
+  addDaysISO, expandEvents, firstRecurrenceDate, floatingDate, floatingRecurrenceRule,
   isOriginalRecurrenceDate, occurrenceForDate, todayKST,
 } from "./calendar";
 import { churchYear } from "./church-year";
@@ -9,7 +9,7 @@ export interface ICSOptions {
   organizationIds?: OrganizationId[];
   includeAllAudience?: boolean;
   includeChurchYear?: boolean;
-  /** Select series that overlap this year; keep their stable DTSTART and bounded RRULE. */
+  /** Select series overlapping this year; preserve their real DTSTART and full RRULE. */
   year?: number;
 }
 
@@ -90,6 +90,7 @@ function rruleLine(event: CalendarEvent): string | null {
   if (!rule || !event.recurrence) return null;
   const line = rule.toString().split(/\r?\n/).find(item => item.startsWith("RRULE:"));
   if (!line) throw new Error("RRule failed to serialize a recurrence");
+  if (event.recurrence.until === null) return line;
   // DATE DTSTART needs DATE UNTIL; TZID DTSTART needs a UTC UNTIL.
   // End-of-day Korean time makes the user's inclusive final date unambiguous.
   const until = event.allDay ? compactDate(event.recurrence.until)
@@ -189,7 +190,12 @@ export function buildICS(events: CalendarEvent[], settings: ChurchSettings, opti
       properties.push(recurrenceProperty("RECURRENCE-ID", event, [date]), "END:VEVENT");
       overrides.push(properties);
     }
-    const master = eventProperties({ ...event, updatedAt: latestChange }, uid, stamp);
+    const firstDate = firstRecurrenceDate(event);
+    // Legacy empty finite rules must not produce a phantom DTSTART either.
+    if (!firstDate) continue;
+    const duration = (floatingDate(event.endDate).getTime() - floatingDate(event.startDate).getTime()) / 86_400_000;
+    const master = eventProperties({ ...event, startDate: firstDate,
+      endDate: addDaysISO(firstDate, duration), updatedAt: latestChange }, uid, stamp);
     const recurrence = rruleLine(event);
     if (recurrence) master.push(recurrence);
     if (excluded.length) master.push(recurrenceProperty("EXDATE", event, excluded));

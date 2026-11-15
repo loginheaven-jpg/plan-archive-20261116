@@ -43,8 +43,8 @@ export function assertUniqueJSONKeys(source: string) {
     }
   }
 }
-export async function readJSON(request: Request): Promise<unknown> {
-  const maxBytes = 65536;
+export async function readJSON(request: Request, maxBytes = 65536): Promise<unknown> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 524288) throw new APIError(400, "INVALID_BODY_LIMIT", "허용된 요청 크기 한도를 확인하세요.");
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) throw new APIError(415, "JSON_REQUIRED", "JSON 형식으로 요청하세요.");
   const length = request.headers.get("content-length");
   if (length && (!/^\d+$/.test(length) || Number(length) > maxBytes)) throw new APIError(413, "INPUT_TOO_LARGE", "입력 크기가 너무 큽니다.");

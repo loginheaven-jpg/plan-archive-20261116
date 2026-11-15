@@ -17,6 +17,7 @@ import type {
 import { organization } from "@/domain/organizations";
 import { canEditEvent } from "@/domain/permissions";
 import { dateLabel, timeLabel, occurrenceForDate } from "@/domain/calendar";
+import { recurrenceLabel } from "@/domain/annual";
 import Dialog from "./Dialog";
 import { api } from "./api";
 import type { EditScope } from "./EventEditor";
@@ -102,10 +103,12 @@ export default function EventDetail({
   actor: Actor | null;
   publicMode: boolean;
   onClose: () => void;
-  onEdit: (scope: EditScope) => void;
+  onEdit: (scope: EditScope, series?: CalendarEvent) => void;
   onAction: (action: "cancel" | "delete") => void;
 }) {
   const [history, setHistory] = useState<ChangeRecord[]>([]);
+  const [master, setMaster] = useState<CalendarEvent | null>(null);
+  const source = master?.id === event.id ? master : null;
   const [error, setError] = useState("");
   const [scope, setScope] = useState<EditScope>(
     event.recurrence && !(event.status === "cancelled" && !event.isException)
@@ -114,11 +117,14 @@ export default function EventDetail({
   );
   useEffect(() => {
     let active = true;
-    api<{ history: ChangeRecord[] }>(
+    api<{ history: ChangeRecord[]; event: CalendarEvent }>(
       `/api/events/${event.id}${publicMode ? "?public=1" : ""}`,
     )
       .then((data) => {
-        if (active) setHistory(data.history);
+        if (active) {
+          setHistory(data.history);
+          setMaster(data.event);
+        }
       })
       .catch((e) => {
         if (active) setError(e.message);
@@ -144,7 +150,13 @@ export default function EventDetail({
                 : "확정"}
           </span>
           {event.recurrence && (
-            <span>{event.isException ? "변경된 회차" : "반복 일정"}</span>
+            <span>
+              {event.isException
+                ? "변경된 회차"
+                : event.recurrence.until === null
+                  ? "계속 반복 · 종료일 없음"
+                  : "기간 반복"}
+            </span>
           )}
         </div>
         <h2 className="event-title">{event.title}</h2>
@@ -198,6 +210,16 @@ export default function EventDetail({
                   : "주관부서 담당자에게만"}
             </dd>
           </div>
+          {event.recurrence && (
+            <div>
+              <dt>반복 범위</dt>
+              <dd>
+                {source
+                  ? recurrenceLabel(source)
+                  : "반복 시작 범위를 확인하고 있어요…"}
+              </dd>
+            </div>
+          )}
         </dl>
         {event.description && (
           <div className="event-description">{event.description}</div>
@@ -311,7 +333,11 @@ export default function EventDetail({
             >
               <Trash2 size={18} />
             </button>
-            <button className="button primary" onClick={() => onEdit(scope)}>
+            <button
+              className="button primary"
+              disabled={!!event.recurrence && scope === "series" && !source}
+              onClick={() => onEdit(scope, source ?? undefined)}
+            >
               <Pencil size={17} />
               {event.status === "cancelled" ? "다시 시작" : "수정"}
             </button>

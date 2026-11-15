@@ -24,8 +24,9 @@ export interface Actor extends Person {
 export interface RecurrenceRule {
   frequency: "weekly" | "monthly" | "yearly";
   interval: number;
-  until: string;
+  until: string | null;
   weekdays?: number[];
+  monthWeek?: number;
 }
 export interface EventInput {
   title: string;
@@ -130,4 +131,41 @@ export interface EventMutation {
   input?: EventInput;
   reason?: string;
   occurrenceDate?: string;
+}
+
+export interface AnnualPlanRow {
+  id: string;
+  dateText: string;
+  input: EventInput;
+  timeConfirmed?: boolean;
+  sourceEventId?: string;
+}
+export interface AnnualDraftInput {
+  year: number;
+  organizationId: OrganizationId;
+  rows: AnnualPlanRow[];
+}
+export interface AnnualDraft extends AnnualDraftInput {
+  id: string;
+  version: number;
+  ownerId: string;
+  createdAt: string;
+  updatedAt: string;
+  publishedRowIds: string[];
+}
+export interface AnnualDraftSummary {
+  id: string;
+  version: number;
+  ownerId: string;
+  year: number;
+  organizationId: OrganizationId;
+  createdAt: string;
+  updatedAt: string;
+  rowCount: number;
+  publishedCount: number;
+}
+export interface AnnualPublishResult {
+  draft: AnnualDraft;
+  events: CalendarEvent[];
+  warnings: string[];
 }

@@ -5,9 +5,12 @@ import type {
   EventInput,
   Occurrence,
   Venue,
+  OrganizationId,
 } from "@/domain/types";
 import { ORGANIZATIONS, organization } from "@/domain/organizations";
 import Dialog from "./Dialog";
+import RecurrenceFields from "./RecurrenceFields";
+import DateExpressionField from "./DateExpressionField";
 import { Save, UserRound, ChevronDown } from "lucide-react";
 
 export type EditScope = "single" | "series";
@@ -15,6 +18,7 @@ function initialInput(
   date: string,
   actor: Actor,
   event?: CalendarEvent | Occurrence,
+  defaultOrganizationId?: OrganizationId,
 ): EventInput {
   if (event)
     return {
@@ -35,7 +39,12 @@ function initialInput(
       recurrence: event.recurrence,
       status: event.status === "tentative" ? "tentative" : "confirmed",
     };
-  const department = actor.departmentIds[0] ?? "worship";
+  const department =
+    defaultOrganizationId &&
+    (actor.role === "admin" ||
+      actor.departmentIds.includes(defaultOrganizationId))
+      ? defaultOrganizationId
+      : (actor.departmentIds[0] ?? "worship");
   return {
     title: "",
     organizationId: department,
@@ -61,6 +70,7 @@ export default function EventEditor({
   event,
   scope,
   venues,
+  defaultOrganizationId,
   onClose,
   onSave,
 }: {
@@ -69,6 +79,7 @@ export default function EventEditor({
   event?: CalendarEvent | Occurrence;
   scope: EditScope;
   venues: Venue[];
+  defaultOrganizationId?: OrganizationId;
   onClose: () => void;
   onSave: (
     input: EventInput,
@@ -76,17 +87,23 @@ export default function EventEditor({
     reason: string,
   ) => Promise<void>;
 }) {
-  const [form, setForm] = useState(() => initialInput(date, actor, event));
+  const [form, setForm] = useState(() =>
+    initialInput(date, actor, event, defaultOrganizationId),
+  );
   const [original, setOriginal] = useState(JSON.stringify(form));
   const operationId = useRef(crypto.randomUUID());
   const [reason, setReason] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [resumeConfirmed, setResumeConfirmed] = useState(false);
+  const [dateExpressionDirty, setDateExpressionDirty] = useState(false);
   const resuming = event?.status === "cancelled";
   const isSingle = !!event?.recurrence && scope === "single";
   const dirty =
-    JSON.stringify(form) !== original || reason !== "" || resumeConfirmed;
+    JSON.stringify(form) !== original ||
+    reason !== "" ||
+    resumeConfirmed ||
+    dateExpressionDirty;
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
       if (dirty) e.preventDefault();
@@ -110,6 +127,10 @@ export default function EventEditor({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    if (dateExpressionDirty) {
+      setError("날짜 표현을 먼저 적용하거나 지운 뒤 등록해 주세요.");
+      return;
+    }
     if (resuming && (!resumeConfirmed || !reason.trim())) {
       setError(
         "취소 해제를 명시적으로 확인하고 다시 진행하는 이유를 입력해 주세요.",
@@ -189,6 +210,17 @@ export default function EventEditor({
               onChange={(e) => update("title", e.target.value)}
             />
           </label>
+          {!isSingle && (
+            <DateExpressionField
+              year={
+                Number(form.startDate.slice(0, 4)) || Number(date.slice(0, 4))
+              }
+              onDirtyChange={setDateExpressionDirty}
+              onApply={(patch) =>
+                setForm((previous) => ({ ...previous, ...patch }))
+              }
+            />
+          )}
           <div className="form-grid">
             <label className="field">
               <span>
@@ -381,68 +413,11 @@ export default function EventEditor({
             </summary>
             <div>
               {!isSingle && (
-                <>
-                  <label className="field">
-                    <span>반복</span>
-                    <select
-                      value={form.recurrence?.frequency ?? "none"}
-                      onChange={(e) =>
-                        update(
-                          "recurrence",
-                          e.target.value === "none"
-                            ? null
-                            : {
-                                frequency: e.target.value as
-                                  | "weekly"
-                                  | "monthly"
-                                  | "yearly",
-                                interval: 1,
-                                until: `${form.startDate.slice(0, 4)}-12-31`,
-                              },
-                        )
-                      }
-                    >
-                      <option value="none">한 번만</option>
-                      <option value="weekly">매주</option>
-                      <option value="monthly">매월 같은 날짜</option>
-                      <option value="yearly">매년 같은 날짜</option>
-                    </select>
-                  </label>
-                  {form.recurrence && (
-                    <div className="form-grid">
-                      <label className="field">
-                        <span>몇 번마다 반복하나요?</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={12}
-                          value={form.recurrence.interval}
-                          onChange={(e) =>
-                            update("recurrence", {
-                              ...form.recurrence!,
-                              interval: Number(e.target.value),
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>반복 마지막 날짜</span>
-                        <input
-                          type="date"
-                          required
-                          min={form.endDate}
-                          value={form.recurrence.until}
-                          onChange={(e) =>
-                            update("recurrence", {
-                              ...form.recurrence!,
-                              until: e.target.value,
-                            })
-                          }
-                        />
-                      </label>
-                    </div>
-                  )}
-                </>
+                <RecurrenceFields
+                  startDate={form.startDate}
+                  value={form.recurrence}
+                  onChange={(value) => update("recurrence", value)}
+                />
               )}
               <label className="field">
                 <span>참여자에게 보이는 안내</span>

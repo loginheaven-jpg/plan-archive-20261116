@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import {
   CalendarDays,
+  ClipboardList,
   ChevronLeft,
   ChevronRight,
   Plus,
@@ -44,6 +45,7 @@ import {
   filterOccurrences,
   occurrencesOnDate,
   occurrenceForDate,
+  firstRecurrenceDate,
   timeLabel,
   todayKST,
 } from "@/domain/calendar";
@@ -207,6 +209,40 @@ export default function CalendarApp({
     const timer = setTimeout(() => setToast(""), 5500);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    if (!prefsReady) return;
+    const id = new URLSearchParams(window.location.search).get("event");
+    if (!id) return;
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        id,
+      )
+    ) {
+      queueMicrotask(() => setToast("원본 일정 주소가 올바르지 않아요."));
+      return;
+    }
+    let active = true;
+    api<{ event: CalendarEvent }>(
+      `/api/events/${id.toLowerCase()}${publicMode ? "?public=1" : ""}`,
+    )
+      .then(({ event }) => {
+        if (!active) return;
+        const date = firstRecurrenceDate(event);
+        if (!date) throw new Error("이 반복 범위에 실제 모임이 없어요.");
+        setDetail(occurrenceForDate(event, date));
+      })
+      .catch((error) => {
+        if (active)
+          setToast(
+            error instanceof Error
+              ? error.message
+              : "원본 일정을 열지 못했어요.",
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [prefsReady, publicMode]);
   const allOccurrences = useMemo(
     () =>
       expandEvents(boot?.events ?? [], `${year}-01-01`, `${year}-12-31`).filter(
@@ -323,11 +359,13 @@ export default function CalendarApp({
       );
     }
   };
-  const edit = (scope: EditScope) => {
+  const edit = (scope: EditScope, suppliedMaster?: CalendarEvent) => {
     if (!detail || !canEditEvent(detail, actor)) return;
     const event =
       scope === "series"
-        ? (boot?.events.find((e) => e.id === detail.id) ?? detail)
+        ? (suppliedMaster ??
+          boot?.events.find((e) => e.id === detail.id) ??
+          detail)
         : detail;
     setEditor({ date: event.startDate, event, scope });
     setDetail(null);
@@ -463,6 +501,7 @@ export default function CalendarApp({
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const params = `org=${selected.join(",")}&all=${includeAll ? "1" : "0"}`;
   const feedURL = `${origin}/api/calendar.ics?${params}`;
+  const annualURL = `/annual?year=${year}${selected.length === 1 ? `&org=${selected[0]}` : ""}`;
   const shareURL = `${origin}/share?${params}&view=${view}&year=${year}&month=${month + 1}`;
   return (
     <div
@@ -492,6 +531,12 @@ export default function CalendarApp({
             <Monitor size={19} />
             공유 게시판 화면
           </a>
+          {!publicMode && (
+            <Link href={annualURL}>
+              <ClipboardList size={19} />
+              연간계획 입력
+            </Link>
+          )}
           <button onClick={() => void openChanges()}>
             <History size={19} />
             최근 변경
@@ -719,6 +764,15 @@ export default function CalendarApp({
                 )}
               </label>
             </div>
+            {view === "list" && !publicMode && (
+              <div className="calendar-options">
+                <Link className="button primary" href={annualURL}>
+                  <ClipboardList size={18} />
+                  연간계획 입력
+                </Link>
+                <span>월을 넘기지 않고 한 해의 일정을 이어서 적어요.</span>
+              </div>
+            )}
             <div className="calendar-options">
               <label className="checkbox-row">
                 <input
@@ -908,6 +962,9 @@ export default function CalendarApp({
           key={`${editor.event?.id ?? "new"}:${editor.date}:${editor.scope}`}
           date={editor.date}
           actor={actor}
+          defaultOrganizationId={
+            selected.length === 1 ? selected[0] : undefined
+          }
           event={editor.event}
           scope={editor.scope}
           venues={boot?.venues ?? []}

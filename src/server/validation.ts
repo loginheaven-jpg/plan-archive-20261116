@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { firstRecurrenceDate } from "../domain/calendar";
 import { ORGANIZATION_IDS, type CalendarEvent, type EventInput, type EventMutation } from "../domain/types";
 
 export class APIError extends Error {
@@ -21,11 +22,22 @@ const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "시간은 HH:m
 const text = (max: number) => z.string().max(max).refine(v => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(v), "허용되지 않는 제어문자입니다.");
 export const organizationSchema = z.enum(ORGANIZATION_IDS);
 const departmentIds = z.array(organizationSchema).max(10).refine(v => new Set(v).size === v.length, "중복 부서입니다.");
-export const recurrenceSchema = z.object({ frequency: z.enum(["weekly", "monthly", "yearly"]), interval: z.number().int().min(1).max(52), until: dateSchema, weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7).refine(v => new Set(v).size === v.length, "중복 요일입니다.").optional() }).strict().superRefine((v, ctx) => {
-  if (v.weekdays && v.frequency !== "weekly") ctx.addIssue({ code: "custom", path: ["weekdays"], message: "요일 선택은 매주 반복에만 사용할 수 있습니다." });
+export const recurrenceSchema = z.object({
+  frequency: z.enum(["weekly", "monthly", "yearly"]),
+  interval: z.number().int().min(1).max(52), until: dateSchema.nullable(),
+  weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7)
+    .refine(v => new Set(v).size === v.length, "중복 요일입니다.").optional(),
+  monthWeek: z.number().int().refine(v => [-1, 1, 2, 3, 4, 5].includes(v), "월 순번은 첫째~다섯째 또는 마지막(-1)입니다.").optional(),
+}).strict().superRefine((v, ctx) => {
+  if (v.monthWeek !== undefined && (v.frequency !== "monthly" || !v.weekdays?.length)) {
+    ctx.addIssue({ code: "custom", path: ["monthWeek"], message: "월 순번은 매월 반복에서 요일과 함께 선택하세요." });
+  }
+  if (v.weekdays && v.frequency !== "weekly" && !(v.frequency === "monthly" && v.monthWeek !== undefined)) {
+    ctx.addIssue({ code: "custom", path: ["weekdays"], message: "요일은 매주 반복 또는 매월 순번 요일 반복에만 사용할 수 있습니다." });
+  }
 });
 export const inputShape = {
-  title: text(200).trim().min(1), organizationId: organizationSchema,
+  title: text(200).trim().min(1, "일정 이름을 입력하세요."), organizationId: organizationSchema,
   startDate: dateSchema, endDate: dateSchema, allDay: z.boolean(),
   startTime: timeSchema.nullable(), endTime: timeSchema.nullable(),
   audience: z.enum(["all", "departments"]), audienceIds: departmentIds,
@@ -45,9 +57,18 @@ export const eventSchema = z.object(inputShape).strict().superRefine((v, ctx) =>
   if (v.audience === "all" && v.audienceIds.length) issue("audienceIds", "전교회 대상에는 부서 대상을 별도 지정하지 않습니다.");
   if (v.audience === "departments" && !v.audienceIds.length) issue("audienceIds", "참여 대상 부서를 선택하세요.");
   if (v.recurrence) {
-    if (v.recurrence.until < v.startDate) issue("recurrence", "반복 종료일이 시작일보다 빠릅니다.");
-    const max = new Date(`${v.startDate}T00:00:00Z`); max.setUTCFullYear(max.getUTCFullYear() + 5);
-    if (v.recurrence.until > max.toISOString().slice(0, 10)) issue("recurrence", "반복은 최대 5년입니다.");
+    if (v.recurrence.until !== null) {
+      if (v.recurrence.until < v.startDate) issue("recurrence", "반복 종료일이 시작일보다 빠릅니다.");
+      const max = new Date(`${v.startDate}T00:00:00Z`); max.setUTCFullYear(max.getUTCFullYear() + 5);
+      if (Number.isFinite(max.getTime()) && v.recurrence.until > max.toISOString().slice(0, 10)) issue("recurrence", "기간이 정해진 반복은 최대 5년입니다.");
+    }
+    if (validDate(v.startDate) && (v.recurrence.until === null || validDate(v.recurrence.until))) {
+      try {
+        if (!firstRecurrenceDate(v)) issue("recurrence", "반복 기간 안에 선택한 요일의 실제 회차가 없습니다.");
+      } catch {
+        issue("recurrence", "반복 규칙을 확인하세요.");
+      }
+    }
     if (days > 31) issue("endDate", "반복 회차의 기간은 최대 31일입니다.");
   }
 });

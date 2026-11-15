@@ -10,7 +10,7 @@ import { APIError, eventInput, occurrencePatch, validateEvent, validDate, type V
 import { authStatus, requireActor, requireAdmin } from "./auth";
 
 type DB = ReturnType<typeof getDB>;
-type TX = Parameters<Parameters<DB["transaction"]>[0]>[0];
+export type TX = Parameters<Parameters<DB["transaction"]>[0]>[0];
 type Reader = DB | TX;
 const MAX_EVENTS = 2000;
 export function canonical(value: unknown): string {
@@ -23,7 +23,9 @@ function normalized(event: CalendarEvent) {
   const duration = (Date.parse(`${event.endDate}T00:00:00Z`) - Date.parse(`${event.startDate}T00:00:00Z`)) / 86400000;
   const starts = [event.startDate, ...event.exceptions.flatMap(e => e.patch.startDate ? [e.patch.startDate] : [])];
   const ends = [event.endDate, ...event.exceptions.map(e => e.patch.endDate ?? addDaysISO(e.patch.startDate ?? e.date, duration))];
-  return { organizationId: event.organizationId, visibility: event.visibility, startDate: starts.sort()[0], endDate: ends.sort().at(-1)!, recurrenceUntil: event.recurrence?.until ?? null, locationId: event.locationId, version: event.version, deleted: event.deleted, payload: event };
+  // NULL in this denormalized index means NON-recurring. The payload retains
+  // actual until:null for open recurrence, while its query index stays searchable.
+  return { organizationId: event.organizationId, visibility: event.visibility, startDate: starts.sort()[0], endDate: ends.sort().at(-1)!, recurrenceUntil: event.recurrence ? event.recurrence.until ?? "2200-12-31" : null, locationId: event.locationId, version: event.version, deleted: event.deleted, payload: event };
 }
 async function masters(from: string, to: string, actor: Actor | null, includeDeleted = false, reader: Reader = getDB()): Promise<CalendarEvent[]> {
   const clauses = [lte(events.startDate, to), or(gte(events.endDate, from), gte(events.recurrenceUntil, addDaysISO(from, -31)))!];
@@ -40,7 +42,7 @@ function withoutInternalNote<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "internalNote")) as T;
 }
 // Wire DTOs omit notes without dropping the provenance approved readers may see.
-function present(event: CalendarEvent, actor: Actor | null, editScope = true): CalendarEvent {
+export function present(event: CalendarEvent, actor: Actor | null, editScope = true): CalendarEvent {
   const readable = readableMaster(event, actor);
   if (!actor) return publicEvent(readable) as unknown as CalendarEvent;
   return {
@@ -124,7 +126,7 @@ export async function getTrash(actor: Actor | null): Promise<CalendarEvent[]> {
   if (rows.length > MAX_EVENTS) throw new APIError(422, "RANGE_TOO_LARGE", "휴지통 조회 한도를 초과했습니다.");
   return rows.map(r => r.event).filter(e => canEditEvent(e, actor));
 }
-async function writeActor(tx: TX, actor: Actor): Promise<Actor> {
+export async function writeActor(tx: TX, actor: Actor): Promise<Actor> {
   // Consistent lock order for all mutations; also protects concurrent grant changes/last-admin checks.
   const [config] = await tx.select({ id: settings.id }).from(settings).where(eq(settings.id, "church")).limit(1).for("update");
   if (!config) throw new APIError(503, "MIGRATION_REQUIRED", "데이터베이스 초기 설정이 필요합니다.");
@@ -146,11 +148,17 @@ async function validateVenue(tx: TX, event: CalendarEvent) {
 function intervals(event: CalendarEvent, from: string, to: string, actor: Actor) {
   return expandEvents([event], from, to).filter(e => !e.deleted && e.status !== "cancelled" && canReadEvent(e, actor)).map(e => ({ locationId: e.locationId, start: Date.parse(`${e.startDate}T${e.allDay ? "00:00" : e.startTime}:00+09:00`), end: Date.parse(`${e.allDay ? addDaysISO(e.endDate, 1) : e.endDate}T${e.allDay ? "00:00" : e.endTime}:00+09:00`) })).sort((a,b) => a.start-b.start);
 }
-async function overlapWarnings(tx: TX, event: CalendarEvent, actor: Actor): Promise<string[]> {
+async function overlapWarnings(tx: TX, event: CalendarEvent, actor: Actor, additionalEvents: CalendarEvent[] = []): Promise<string[]> {
   if (event.deleted || event.status === "cancelled" || (!event.locationId && !event.exceptions.some(e => e.patch.locationId))) return [];
   const from = normalized(event).startDate;
-  const to = [normalized(event).endDate, event.recurrence ? addDaysISO(event.recurrence.until, 31) : event.endDate].sort().at(-1)!;
-  const candidates = await masters(from, to, actor, false, tx);
+  // A legacy/moved exception may precede the master by years. Bound the total
+  // interval from its actual lower edge too, not just the master start date.
+  const horizon = [addDaysISO(from, 366), addDaysISO(event.startDate, 366), "2200-12-31"].sort()[0];
+  const duration = Math.round((Date.parse(`${event.endDate}T00:00:00Z`) - Date.parse(`${event.startDate}T00:00:00Z`)) / 86400000);
+  const finiteEnd = event.recurrence?.until ? addDaysISO(event.recurrence.until, duration) : event.recurrence ? horizon : normalized(event).endDate;
+  const to = [finiteEnd, horizon].sort()[0];
+  const limitWarnings = event.recurrence && (!event.recurrence.until || finiteEnd > horizon) ? [`장소 겹침은 ${from}부터 ${to}까지만 확인했습니다. 이후 반복 회차의 충돌은 보장하지 않습니다.`] : [];
+  const candidates = [...await masters(from, to, actor, false, tx), ...additionalEvents.filter(other => canReadEvent(other, actor))];
   const own = intervals(event, from, to, actor);
   for (const other of candidates) {
     if (other.id === event.id) continue;
@@ -159,31 +167,44 @@ async function overlapWarnings(tx: TX, event: CalendarEvent, actor: Actor): Prom
       const a = own.filter(i => i.locationId === locationId), b = theirs.filter(i => i.locationId === locationId);
       let i = 0, j = 0;
       while (i < a.length && j < b.length) {
-        if (a[i].start < b[j].end && b[j].start < a[i].end) return ["선택 장소에 겹치는 일정이 있어요."];
+        if (a[i].start < b[j].end && b[j].start < a[i].end) return ["선택 장소에 겹치는 일정이 있어요.", ...limitWarnings];
         if (a[i].end <= b[j].start) i++; else j++;
       }
     }
   }
   // Invisible conflicts are omitted; no private title/time inference is possible through warnings.
-  return [];
+  return limitWarnings;
+}
+export interface PreparedEventCreation { event: CalendarEvent; input: EventInput; warnings: string[]; existing: boolean }
+// Caller must refresh the actor and hold the church/user locks. No writes here:
+// annual publishing can validate every selected row before the first event insert.
+export async function prepareEventCreation(tx: TX, current: Actor, operationId: string, input: EventInput, additionalEvents: CalendarEvent[] = []): Promise<PreparedEventCreation> {
+  const id = operationId.toLowerCase();
+  if (!canCreate(current) || !canEditEvent(input, current)) throw new APIError(403, "EDIT_FORBIDDEN", "이 부서의 일정 입력 권한이 없습니다.");
+  const [existing] = await tx.select().from(events).where(eq(events.operationId, id)).limit(1).for("update");
+  if (existing) {
+    if (existing.creatorId !== current.id || canonical(existing.initialPayload) !== canonical(input)) throw new APIError(409, "OPERATION_CONFLICT", "이 등록 번호는 다른 입력에 이미 사용되었습니다.");
+    if (!canReadEvent(existing.payload, current) || (existing.payload.deleted && !canEditEvent(existing.payload, current))) throw new APIError(404, "NOT_FOUND", "열람 가능한 일정을 찾을 수 없습니다.");
+    return { event: existing.payload, input, warnings: [], existing: true };
+  }
+  const event: CalendarEvent = { ...input, id, version: 1, cancelReason: "", deleted: false, createdAt: new Date().toISOString(), createdBy: { id: current.id, name: current.name }, updatedAt: null, updatedBy: null, exceptions: [] };
+  await validateVenue(tx, event);
+  const warnings = await overlapWarnings(tx, event, current, additionalEvents);
+  return { event, input, warnings, existing: false };
+}
+export async function writePreparedEvent(tx: TX, current: Actor, prepared: PreparedEventCreation): Promise<void> {
+  if (prepared.existing) return;
+  const { event, input } = prepared;
+  await tx.insert(events).values({ id: event.id, operationId: event.id, creatorId: current.id, initialPayload: input as unknown as Record<string, unknown>, ...normalized(event) });
+  await insertAudit(tx, null, event, current, "create", "", Object.keys(input));
 }
 export async function createEvent(actor: Actor | null, operationId: string, input: EventInput): Promise<{ event: CalendarEvent; warnings: string[] }> {
   const authenticated = requireActor(actor);
-  const id = operationId.toLowerCase();
   return getDB().transaction(async tx => {
     const current = await writeActor(tx, authenticated);
-    if (!canCreate(current) || !canEditEvent(input, current)) throw new APIError(403, "EDIT_FORBIDDEN", "이 부서의 일정 입력 권한이 없습니다.");
-    const [existing] = await tx.select().from(events).where(eq(events.operationId, id)).limit(1).for("update");
-    if (existing) {
-      if (existing.creatorId !== current.id || canonical(existing.initialPayload) !== canonical(input)) throw new APIError(409, "OPERATION_CONFLICT", "이 등록 번호는 다른 입력에 이미 사용되었습니다.");
-      return { event: existing.payload, warnings: [] };
-    }
-    const event: CalendarEvent = { ...input, id, version: 1, cancelReason: "", deleted: false, createdAt: new Date().toISOString(), createdBy: { id: current.id, name: current.name }, updatedAt: null, updatedBy: null, exceptions: [] };
-    await validateVenue(tx, event);
-    const warnings = await overlapWarnings(tx, event, current);
-    await tx.insert(events).values({ id, operationId: id, creatorId: current.id, initialPayload: input as unknown as Record<string, unknown>, ...normalized(event) });
-    await insertAudit(tx, null, event, current, "create", "", Object.keys(input));
-    return { event, warnings };
+    const prepared = await prepareEventCreation(tx, current, operationId, input);
+    await writePreparedEvent(tx, current, prepared);
+    return { event: present(prepared.event, current), warnings: prepared.warnings };
   });
 }
 function originalOccurrence(event: CalendarEvent, date: string): CalendarEvent {

@@ -43,6 +43,7 @@ function publicInput(input: Partial<EventInput> | CalendarEvent): Partial<Public
           interval: rule.interval,
           until: rule.until,
           ...(rule.weekdays ? { weekdays: [...rule.weekdays] } : {}),
+          ...(rule.monthWeek !== undefined ? { monthWeek: rule.monthWeek } : {}),
         };
       } else {
         // Clone nested arrays so edits to the projection cannot mutate the source.

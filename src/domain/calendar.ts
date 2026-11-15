@@ -33,21 +33,45 @@ export function addDaysISO(date: string, days: number): string {
 /** RRule dates are floating midnight values, never actual UTC event instants. */
 export function floatingRecurrenceRule(event: Pick<EventInput, "startDate" | "recurrence">): RRule | null {
   if (!event.recurrence) return null;
-  const { frequency, interval, until, weekdays } = event.recurrence;
+  const { frequency, interval, until, weekdays, monthWeek } = event.recurrence;
+  if (!["weekly", "monthly", "yearly"].includes(frequency)) throw new RangeError("Invalid recurrence frequency");
   if (!Number.isInteger(interval) || interval < 1) throw new RangeError("Invalid recurrence interval");
-  if (weekdays?.some(day => !Number.isInteger(day) || day < 0 || day > 6)) {
+  if (weekdays && (!weekdays.length || new Set(weekdays).size !== weekdays.length
+    || weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6))) {
     throw new RangeError("Recurrence weekdays must use Sunday=0 through Saturday=6");
   }
-  const end = floatingDate(until);
-  end.setUTCHours(23, 59, 59, 999);
+  if (monthWeek !== undefined && (frequency !== "monthly" || !weekdays?.length
+    || !Number.isInteger(monthWeek) || ![-1, 1, 2, 3, 4, 5].includes(monthWeek))) {
+    throw new RangeError("Monthly nth weekdays require monthWeek=1..5 or -1 and weekdays");
+  }
+  if (weekdays && frequency !== "weekly" && !(frequency === "monthly" && monthWeek !== undefined)) {
+    throw new RangeError("Weekdays require weekly or monthly nth-weekday recurrence");
+  }
+  const start = floatingDate(event.startDate);
+  const end = until === null ? null : floatingDate(until);
+  end?.setUTCHours(23, 59, 59, 999);
+  const byweekday = weekdays?.map(day => monthWeek === undefined ? WEEKDAYS[day] : WEEKDAYS[day].nth(monthWeek));
+  const freq = { weekly: RRule.WEEKLY, monthly: RRule.MONTHLY, yearly: RRule.YEARLY }[frequency];
+  // An input range starts on or after this date, not necessarily on a meeting day.
+  // Align the series anchor before applying interval, so its first DTSTART is real.
+  const first = byweekday ? new RRule({ freq, interval: 1, dtstart: start, byweekday, wkst: RRule.MO })
+    .after(start, true) : start;
+  if (!first) throw new RangeError("No representable recurrence start date");
   return new RRule({
-    freq: { weekly: RRule.WEEKLY, monthly: RRule.MONTHLY, yearly: RRule.YEARLY }[frequency],
+    freq,
     interval,
-    dtstart: floatingDate(event.startDate),
-    until: end,
+    dtstart: first,
+    ...(end ? { until: end } : {}),
     wkst: RRule.MO,
-    ...(weekdays?.length ? { byweekday: [...new Set(weekdays)].map(day => WEEKDAYS[day]) } : {}),
+    ...(byweekday ? { byweekday } : {}),
   });
+}
+
+/** Returns the first real original occurrence without expanding an open series. */
+export function firstRecurrenceDate(event: Pick<EventInput, "startDate" | "recurrence">): string | null {
+  const rule = floatingRecurrenceRule(event);
+  if (!rule) return event.startDate;
+  return rule.after(floatingDate(event.startDate), true)?.toISOString().slice(0, 10) ?? null;
 }
 
 export function isOriginalRecurrenceDate(event: CalendarEvent, date: string, rule = floatingRecurrenceRule(event)): boolean {
@@ -119,7 +143,7 @@ export function expandEvents(events: CalendarEvent[], from: string, to: string, 
     } else {
       originalDates.add(event.startDate);
     }
-    // A move can enter this window from anywhere in the bounded original series.
+    // A move can enter this window from any original date, even in an open series.
     // Looking only at originals within the window would silently lose those moves.
     for (const exception of event.exceptions) {
       if (isOriginalRecurrenceDate(event, exception.date, rule)) originalDates.add(exception.date);

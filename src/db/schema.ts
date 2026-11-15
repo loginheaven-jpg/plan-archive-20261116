@@ -1,5 +1,5 @@
 import { mysqlTable, varchar, int, boolean, json, index, uniqueIndex } from "drizzle-orm/mysql-core";
-import type { CalendarEvent, ChangeRecord, ChurchSettings, OrganizationId } from "../domain/types";
+import type { AnnualDraft, AnnualDraftInput, CalendarEvent, ChangeRecord, ChurchSettings, OrganizationId } from "../domain/types";
 
 export const events = mysqlTable("plan_events", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -46,3 +46,16 @@ export const migrations = mysqlTable("plan_migrations", {
   checksum: varchar("checksum", { length: 64 }).notNull(),
   appliedAt: varchar("applied_at", { length: 24 }).notNull(),
 });
+
+// Draft payloads are never queried by event/bootstrap/ICS services.
+export const annualDrafts = mysqlTable("plan_annual_drafts", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  ownerId: varchar("owner_id", { length: 128 }).notNull(),
+  year: int("year").notNull(),
+  organizationId: varchar("organization_id", { length: 32 }).notNull(),
+  version: int("version").notNull(),
+  createdAt: varchar("created_at", { length: 24 }).notNull(),
+  updatedAt: varchar("updated_at", { length: 24 }).notNull(),
+  initialPayload: json("initial_payload").$type<AnnualDraftInput>().notNull(),
+  payload: json("payload").$type<AnnualDraft>().notNull(),
+}, t => [index("plan_annual_owner_year_idx").on(t.ownerId, t.year), index("plan_annual_year_idx").on(t.year)]);

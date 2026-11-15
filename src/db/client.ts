@@ -38,13 +38,14 @@ export function getDB(): MySql2Database<typeof schema> {
 }
 export async function closeDB() { const current = pool; pool = undefined; db = undefined; if (current) await current.end(); }
 export async function schemaReady(): Promise<boolean> {
-  const [rows] = await getPool().query<mysql.RowDataPacket[]>("SELECT id FROM plan_migrations WHERE id = ? LIMIT 1", ["0001_calendar"]);
-  if (!rows.length) return false;
+  const [rows] = await getPool().query<mysql.RowDataPacket[]>("SELECT id FROM plan_migrations WHERE id IN (?, ?) LIMIT 2", ["0001_calendar", "0002_annual"]);
+  if (rows.length !== 2) return false;
   // Also detect a partial/removed schema instead of trusting only the migration marker.
   await getDB().select().from(schema.events).limit(1);
   await getDB().select().from(schema.audit).limit(1);
   await getDB().select().from(schema.users).limit(1);
   const config = await getDB().select().from(schema.settings).where(eq(schema.settings.id, "church")).limit(1);
   await getDB().select().from(schema.venues).limit(1);
+  await getDB().select().from(schema.annualDrafts).limit(1);
   return config.length > 0;
 }
