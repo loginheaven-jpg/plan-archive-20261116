@@ -86,3 +86,9 @@ Phase 1의 앱 구현 대상과 진행 상태는 [TODO](TODO.md), 승인한 전�
 ### 실제 교적부 SSO 보완
 
 일반 일정은 로그인 없이 열람하고 편집에만 실제 교적부 인증을 요구한다. 별도 봉인키 의존성 없이 공식 서버에서 현재 세션·승인·회수를 확인하며 로그인 복귀 실패는 재리다이렉트 대신 안내한다. 입력 만료와 계정 전환의 보존·목록 정리까지 보완했다. 325개 자동 검사·타입·정적 검사와 비밀값 없는 최종 빌드가 통과했다. 실제 계정 검증·운영 배포 결과는 [확인 기록](docs/VERIFICATION.md)에서 구별한다. 추가 격리 화면 확인은 `python3 tests/editor-session-ui.py`, `python3 tests/sso-refresh-ui.py`다.
+
+## 같은 화면 모달 SSO · 2026-11-16
+
+현재 화면의 로그인창에서 기존 교적부 계정을 연결한다. 다른 예봄 앱의 유효 세션은 비밀번호 재입력 없이 확인한다. 프로필·비밀번호 변경 필요는 신원 확인과 분리하며 편집 제한은 유지한다. 현재 구현은 [SSO 안내](docs/SSO_SETUP.md)를 참고한다. 기존 왕복 경로·이전 검사 기록은 아래 이력의 당시 상태다. 운영 배포 여부는 [최신 확인 기록](docs/VERIFICATION.md)을 확인한다.
+
+현재 격리 확인 명령: `pnpm test`, `pnpm check`, `pnpm lint`, `python3 tests/modal_login_ui.py`, `python3 tests/editor-session-ui.py`, `python3 tests/ui_regression.py`, `python3 tests/annual_ui_regression.py`. 실제 회원·프로필·행사를 시험 변경하지 않는다.

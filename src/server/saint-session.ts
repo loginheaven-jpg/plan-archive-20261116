@@ -1,4 +1,5 @@
 import type { Person } from "../domain/types";
+import type { ClientAuthSession, ProfileField } from "../domain/auth";
 
 export const SAINT_COOKIE = "saint_record_session";
 export const SAINT_SESSION_URL = "https://saint.yebom.org/api/auth/session";
@@ -9,12 +10,15 @@ const MAX_COOKIE_HEADER_BYTES = 32768;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const COOKIE_OCTETS = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/;
 
-export type SaintState = "authenticated" | "anonymous" | "invalid_cookie" | "revoked" | "not_approved" | "profile_incomplete" | "unavailable" | "not_configured" | "wrong_origin" | "logged_out";
+export type SaintState = "authenticated" | "anonymous" | "invalid_cookie" | "revoked" | "not_approved" | "profile_incomplete" | "password_reset_required" | "unavailable" | "not_configured" | "wrong_origin" | "logged_out";
 export interface SaintSession {
   state: SaintState;
   person: Person | null;
   message: string;
   setCookies: string[];
+  profileCompletionRequired: boolean;
+  passwordResetRequired: boolean;
+  profileMissingFields: ProfileField[];
 }
 const messages: Record<SaintState, string> = {
   authenticated: "교적부의 현재 승인된 세션을 확인했습니다. 일정 권한은 별도로 부여됩니다.",
@@ -22,14 +26,19 @@ const messages: Record<SaintState, string> = {
   invalid_cookie: "공유 로그인 쿠키가 중복되었거나 올바르지 않습니다. 교적부에서 다시 로그인하고 쿠키 도메인 .yebom.org 설정을 확인하세요.",
   revoked: "교적부에서 세션이 취소되었거나 계정이 삭제되었습니다. 교적부에서 다시 로그인하세요.",
   not_approved: "교적부 계정 승인이 필요합니다. 교적부 관리자에게 승인을 요청하세요.",
-  profile_incomplete: "교적부에서 프로필 작성을 먼저 완료한 뒤 예봄일정으로 돌아오세요. 반복 로그인으로는 해결되지 않습니다.",
+  profile_incomplete: "교적부 로그인은 확인됐어요. 필수 프로필을 보완하면 일정 편집을 할 수 있어요. 비밀번호를 다시 입력할 필요는 없어요.",
+  password_reset_required: "교적부 로그인은 확인됐어요. 필수 비밀번호 변경을 완료한 뒤 편집할 수 있어요.",
   unavailable: "교적부 세션 확인 서버에 연결할 수 없습니다. 기존 쿠키는 유지됩니다. 잠시 후 다시 시도하세요.",
   not_configured: "신뢰할 수 있는 운영 HTTPS 주소가 아직 설정되지 않았습니다.",
   wrong_origin: "Manus Preview 등 다른 도메인에서는 교적부 공유 쿠키를 받을 수 없습니다. 운영 도메인에서 로그인하세요.",
   logged_out: "예봄일정에서 로그아웃한 상태입니다. 로그인 버튼으로 다시 연결하세요.",
 };
-export function saintResult(state: SaintState, person: Person | null = null, setCookies: string[] = []): SaintSession {
-  return { state, person, message: messages[state], setCookies };
+export function saintResult(state: SaintState, person: Person | null = null, setCookies: string[] = [], flags: Partial<Pick<SaintSession, "profileCompletionRequired" | "passwordResetRequired" | "profileMissingFields">> = {}): SaintSession {
+  return { state, person, message: messages[state], setCookies, profileCompletionRequired: state === "profile_incomplete", passwordResetRequired: state === "password_reset_required", profileMissingFields: [], ...flags };
+}
+export function clientAuthSession(session: SaintSession): ClientAuthSession {
+  const authenticated = !!session.person && ["authenticated", "profile_incomplete", "password_reset_required"].includes(session.state);
+  return { authenticated, state: session.state, identity: authenticated ? session.person : null, profileCompletionRequired: session.profileCompletionRequired, passwordResetRequired: session.passwordResetRequired, profileMissingFields: session.profileMissingFields, message: session.message };
 }
 
 /** Raw singleton values only: never decode a cookie into a new header delimiter. */
@@ -89,7 +98,7 @@ export function appendSaintCookies(response: Response, session: SaintSession): R
   return response;
 }
 
-async function boundedJSON(response: Response, signal: AbortSignal): Promise<unknown> {
+export async function boundedJSON(response: Response, signal: AbortSignal): Promise<unknown> {
   const length = response.headers.get("content-length");
   if ((length && (!/^\d+$/.test(length) || Number(length) > SAINT_MAX_BODY_BYTES)) || !(response.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json") || !response.body) {
     void response.body?.cancel().catch(() => undefined);
@@ -145,10 +154,17 @@ async function check(request: Request): Promise<SaintSession> {
       const user = body.user;
       if (user.is_approved === false) return saintResult("not_approved", null, setCookies);
       if (user.is_approved !== true || (user.needs_profile_completion !== undefined && typeof user.needs_profile_completion !== "boolean")) return saintResult("unavailable");
-      if (user.needs_profile_completion === true) return saintResult("profile_incomplete", null, setCookies);
       if (typeof user.user_id !== "string" || !user.user_id.trim() || user.user_id.length > 128 || typeof user.name !== "string" || !user.name.trim() || user.name.length > 100 || CONTROL.test(user.user_id + user.name)) return saintResult("unavailable");
+      if (typeof user.password_reset_required !== "boolean") return saintResult("unavailable", null, setCookies);
+      const allowedFields: ProfileField[] = ["birth_date", "gender", "phone"];
+      const rawMissing = Array.isArray(user.profile_missing_fields) ? user.profile_missing_fields : [];
+      const profileMissingFields = allowedFields.filter(field => rawMissing.includes(field));
+      const flags = { profileCompletionRequired: user.needs_profile_completion === true, passwordResetRequired: user.password_reset_required, profileMissingFields };
+      const person = { id: user.user_id, name: user.name.trim() };
+      if (flags.passwordResetRequired) return saintResult("password_reset_required", person, setCookies, flags);
+      if (flags.profileCompletionRequired) return saintResult("profile_incomplete", person, setCookies, flags);
       // Deliberately ignore email, finance_role, permissions and every private claim.
-      return saintResult("authenticated", { id: user.user_id, name: user.name.trim() }, setCookies);
+      return saintResult("authenticated", person, setCookies, flags);
     })()]);
   } catch { return saintResult("unavailable"); }
   finally { if (timer !== undefined) clearTimeout(timer); }

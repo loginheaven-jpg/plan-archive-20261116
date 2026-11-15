@@ -74,8 +74,9 @@ class MockAPI:
             self.checkins += 1
             message = {"profile_incomplete": "격리 검사: 교적부 프로필 작성을 완료해 주세요.",
                        "not_approved": "격리 검사: 교적부 계정 승인을 요청해 주세요."}.get(self.state, "")
-            payload = {"authenticated": self.state == "authenticated", "state": self.state, "message": message}
-            status = 403 if message else 200
+            identity_actor = self.actor or (A if self.state == "profile_incomplete" else None)
+            payload = {"authenticated": self.state in ("authenticated", "profile_incomplete"), "state": self.state, "message": message, "identity": {"id": identity_actor["id"], "name": identity_actor["name"]} if identity_actor else None, "profileCompletionRequired": self.state == "profile_incomplete", "passwordResetRequired": False, "profileMissingFields": ["phone"] if self.state == "profile_incomplete" else []}
+            status = 403 if self.state == "not_approved" else 200
             if self.hold_checkin:
                 self.hold_checkin = False
                 self.pending_checkins.append((route, payload, status))

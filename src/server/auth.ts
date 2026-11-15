@@ -55,6 +55,7 @@ export async function verifiedPerson(request: Request, options: AuthOptions = {}
   const session = await saintSessionFor(request, options);
   if (session.state === "unavailable") throw new APIError(503, "SAINT_UNAVAILABLE", session.message);
   if (session.state === "profile_incomplete") throw new APIError(403, "PROFILE_COMPLETION_REQUIRED", session.message);
+  if (session.state === "password_reset_required") throw new APIError(403, "PASSWORD_RESET_REQUIRED", session.message);
   if (session.state === "not_approved") throw new APIError(403, "SAINT_APPROVAL_REQUIRED", session.message);
   return session.person;
 }

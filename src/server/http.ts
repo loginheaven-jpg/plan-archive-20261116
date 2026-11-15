@@ -41,7 +41,7 @@ export async function readActor(request: Request): Promise<Actor | null> {
     if (
       error instanceof APIError &&
       (error.status === 503 ||
-        ["SAINT_APPROVAL_REQUIRED", "PROFILE_COMPLETION_REQUIRED"].includes(
+        ["SAINT_APPROVAL_REQUIRED", "PROFILE_COMPLETION_REQUIRED", "PASSWORD_RESET_REQUIRED"].includes(
           error.code,
         ))
     )

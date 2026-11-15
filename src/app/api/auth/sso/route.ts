@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 function friendly(session: SaintSession, origin: string | null): Response {
   const code = ["unavailable", "not_configured"].includes(session.state)
     ? 503
-    : ["not_approved", "profile_incomplete", "wrong_origin"].includes(
+    : ["not_approved", "profile_incomplete", "password_reset_required", "wrong_origin"].includes(
           session.state,
         )
       ? 403

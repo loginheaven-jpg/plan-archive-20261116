@@ -49,6 +49,9 @@ import {
 import { useUnsavedGuard } from "./useUnsavedGuard";
 import "./annual.css";
 import LoginLink from "@/components/auth/LoginLink";
+import { useAuth } from "@/components/auth/AuthProvider";
+import { eligibleSession } from "@/components/auth/client-session";
+import { AUTH_CHANGED_EVENT } from "@/domain/auth";
 
 export default function AnnualApp({
   initialYear,
@@ -57,6 +60,7 @@ export default function AnnualApp({
   initialYear: number;
   initialOrganization: OrganizationId | null;
 }) {
+  const { session, error: authError, logout } = useAuth();
   const [workspace, setWorkspace] = useState<Workspace>(() =>
     blankWorkspace(initialYear),
   );
@@ -81,8 +85,17 @@ export default function AnnualApp({
   const [newOpen, setNewOpen] = useState(false);
   const [conflict, setConflict] = useState<DraftConflict | null>(null);
   const initialOrgApplied = useRef(false);
+  const workspaceOwners = useRef(new Map<string, string>());
+  const [workspaceOwnerId, setWorkspaceOwnerId] = useState<string | null>(null);
+  const currentActor = useRef<Bootstrap["actor"]>(null);
+  const pendingRefresh = useRef(false);
   const loadGeneration = useRef(0);
-  const actor = boot?.actor ?? null;
+  const actor =
+    !authError &&
+    eligibleSession(session) &&
+    boot?.actor?.id === session?.identity?.id
+      ? (boot?.actor ?? null)
+      : null;
   const allowedIds = useMemo(
     () =>
       !actor || !canCreate(actor)
@@ -94,7 +107,9 @@ export default function AnnualApp({
             ),
     [actor],
   );
-  const mayEdit = !loading && !loadError && canCreate(actor);
+  const ownsWorkspace =
+    workspaceOwnerId === null || actor?.id === workspaceOwnerId;
+  const mayEdit = !loading && !loadError && ownsWorkspace && canCreate(actor);
   const dirty = workspaceDirty(workspace);
   const parkedDirtyCount = parked.filter(workspaceDirty).length;
   const guard = useUnsavedGuard(dirty || parkedDirtyCount > 0, busy);
@@ -109,7 +124,11 @@ export default function AnnualApp({
     return data;
   }, []);
   const refresh = useCallback(async () => {
-    if (busyRef.current) return;
+    if (busyRef.current) {
+      pendingRefresh.current = true;
+      return;
+    }
+    pendingRefresh.current = false;
     const generation = ++loadGeneration.current;
     const current = () => generation === loadGeneration.current;
     // Drop account-scoped data before awaiting; the unsaved workspace stays separate.
@@ -128,10 +147,14 @@ export default function AnnualApp({
             ? ORGANIZATIONS.map((o) => o.id)
             : data.actor.departmentIds
           : [];
-      if (!initialOrgApplied.current) {
+      if (!initialOrgApplied.current && data.actor && canCreate(data.actor)) {
         initialOrgApplied.current = true;
         if (initialOrganization && allowed.includes(initialOrganization))
-          setWorkspace((p) => ({ ...p, organizationId: initialOrganization }));
+          setWorkspace((p) =>
+            p.organizationId
+              ? p
+              : { ...p, organizationId: initialOrganization },
+          );
         else if (initialOrganization)
           setNotice(
             "전달된 부서에 입력 권한이 없어요. 담당 부서를 직접 선택해 주세요.",
@@ -166,13 +189,26 @@ export default function AnnualApp({
       ++loadGeneration.current;
     };
     void refresh();
-    window.addEventListener("yebom:session-changed", refreshSession);
+    window.addEventListener(AUTH_CHANGED_EVENT, refreshSession);
     return () => {
       // Invalidate initial, manual, and session requests on unmount/year change.
       invalidate();
-      window.removeEventListener("yebom:session-changed", refreshSession);
+      window.removeEventListener(AUTH_CHANGED_EVENT, refreshSession);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    currentActor.current = actor;
+    if (
+      actor &&
+      canCreate(actor) &&
+      (workspaceOwnerId === null || workspaceOwnerId === actor.id)
+    ) {
+      workspaceOwners.current.set(workspace.key, actor.id);
+      if (workspaceOwnerId === null)
+        queueMicrotask(() => setWorkspaceOwnerId(actor.id));
+    }
+  }, [actor, workspace.key, workspaceOwnerId]);
 
   const parkCurrent = (current = workspace) => {
     if (current.rows.length || current.id)
@@ -180,6 +216,8 @@ export default function AnnualApp({
   };
   const adopt = (draft: AnnualDraft, key = workspace.key): Workspace => {
     const next = { ...fromDraft(draft), key };
+    workspaceOwners.current.set(key, draft.ownerId);
+    setWorkspaceOwnerId(draft.ownerId);
     setWorkspace(next);
     const summary: AnnualDraftSummary = {
       id: draft.id,
@@ -203,9 +241,10 @@ export default function AnnualApp({
   const endBusy = () => {
     busyRef.current = false;
     setBusy(false);
+    if (pendingRefresh.current) void refresh();
   };
   const checkDraftOwner = (draft: AnnualDraft) => {
-    if (!actor || draft.ownerId !== actor.id)
+    if (!currentActor.current || draft.ownerId !== currentActor.current.id)
       throw new Error(
         "현재 로그인 사용자의 개인 초안이 아니에요. 계정과 권한을 다시 확인해 주세요.",
       );
@@ -291,9 +330,14 @@ export default function AnnualApp({
       setBoot(null);
       setDrafts([]);
     }
-    setWorkspace(
-      blankWorkspace(year, current.organizationId, crypto.randomUUID()),
+    const next = blankWorkspace(
+      year,
+      ownsWorkspace ? current.organizationId : "",
+      crypto.randomUUID(),
     );
+    if (actor) workspaceOwners.current.set(next.key, actor.id);
+    setWorkspaceOwnerId(actor?.id ?? null);
+    setWorkspace(next);
     setNotice(
       current.rows.length
         ? "이전 입력은 이 세션의 ‘작성 중 입력’에 그대로 보관했어요. 브라우저를 닫기 전 서버에 저장해 주세요."
@@ -331,8 +375,14 @@ export default function AnnualApp({
     }
   };
   const restoreParked = (saved: Workspace) => {
-    if (busyRef.current) return;
+    if (
+      busyRef.current ||
+      !actor ||
+      workspaceOwners.current.get(saved.key) !== actor.id
+    )
+      return;
     parkCurrent();
+    setWorkspaceOwnerId(actor.id);
     setParked((p) => p.filter((w) => w.key !== saved.key));
     if (workspace.year !== saved.year) {
       setLoading(true);
@@ -474,16 +524,19 @@ export default function AnnualApp({
   return (
     <div className="annual-app app-shell">
       <AnnualSidebar
-        workspace={workspace}
+        workspace={ownsWorkspace ? workspace : blankWorkspace(workspace.year)}
         actor={actor}
         allowedIds={allowedIds}
         mayEdit={mayEdit}
         busy={busy}
         loading={loading}
         inputReady={inputReady}
-        drafts={drafts}
+        drafts={actor ? drafts : []}
         draftError={draftError}
-        parked={parked}
+        parked={parked.filter(
+          (saved) =>
+            !!actor && workspaceOwners.current.get(saved.key) === actor.id,
+        )}
         onYear={selectYear}
         onOrganization={(id) =>
           setWorkspace((p) => ({ ...p, organizationId: id }))
@@ -508,6 +561,16 @@ export default function AnnualApp({
               ? `${actor.name} · ${actor.role === "admin" ? "일정 관리자" : actor.role === "editor" ? "부서 담당자" : "조회 전용"}`
               : "로그인 / 연결 확인 필요"}
           </span>
+          {session?.identity && (
+            <button
+              type="button"
+              className="text-button"
+              disabled={busy}
+              onClick={() => void logout()}
+            >
+              로그아웃
+            </button>
+          )}
         </header>
         <section className="page-heading">
           <div>
@@ -543,9 +606,11 @@ export default function AnnualApp({
             <LockKeyhole size={24} />
             <div>
               <h2>
-                {actor
-                  ? "연간계획 입력 권한이 필요해요"
-                  : "실제 교회 계정으로 로그인해 주세요"}
+                {!ownsWorkspace
+                  ? "다른 계정의 작성 중 입력은 숨겨 보관했어요"
+                  : actor
+                    ? "연간계획 입력 권한이 필요해요"
+                    : "실제 교회 계정으로 로그인해 주세요"}
               </h2>
               <p>
                 {boot?.auth.message ||
@@ -555,14 +620,24 @@ export default function AnnualApp({
                 가상 담당자나 임시 계정을 사용하지 않습니다. 실제 부서 담당
                 권한이 있는 계정만 개인 초안과 일괄 등록을 사용할 수 있어요.
               </p>
-              {!actor && boot?.auth.loginUrl && (
-                <LoginLink
-                  className="button primary"
-                  entry={boot.auth.loginUrl}
-                  returnTo={`/annual?year=${workspace.year}${workspace.organizationId ? `&org=${workspace.organizationId}` : ""}`}
-                  target={dirty || parkedDirtyCount > 0 ? "_blank" : undefined}
-                  rel="noopener noreferrer"
+              {!ownsWorkspace && (
+                <p>
+                  같은 계정으로 돌아오면 이전 초안을 이어 쓸 수 있어요. 다른
+                  계정으로 저장되지 않도록 입력과 저장을 막았어요.
+                </p>
+              )}
+              {!ownsWorkspace && actor && canCreate(actor) && (
+                <button
+                  type="button"
+                  className="button"
+                  disabled={busy}
+                  onClick={() => startNew(workspace.year)}
                 >
+                  현재 계정의 새 초안 시작
+                </button>
+              )}
+              {!actor && (
+                <LoginLink className="button primary">
                   <LogIn size={18} />
                   로그인
                 </LoginLink>
@@ -586,107 +661,111 @@ export default function AnnualApp({
             날짜는 선택 연도, 시각은 한국시간 기준입니다.
           </span>
         </div>
-        <div className="annual-toolbar">
-          <div className="annual-tool-buttons">
-            <button
-              className="button"
-              disabled={!inputReady || busy}
-              onClick={() => setPasteOpen(true)}
-            >
-              <ClipboardPaste size={18} />표 붙여넣기
-            </button>
-            <button
-              className="button"
-              disabled={!inputReady || busy || workspace.year <= 2000}
-              onClick={() => setPreviousOpen(true)}
-            >
-              <Copy size={18} />
-              지난해 가져오기
-            </button>
-          </div>
-          <span>
-            {workspace.rows.length}행 · 등록 완료 {hiddenSaved}개 ·{" "}
-            {workspace.id
-              ? `개인 초안 개정 ${workspace.version}`
-              : "새 초안 (아직 서버 저장 전)"}
-          </span>
-        </div>
-        {notice && (
-          <div className="annual-status" role="status">
-            <Check size={18} />
-            <span>{notice}</span>
-            <button
-              className="icon-button"
-              aria-label="알림 닫기"
-              onClick={() => setNotice("")}
-            >
-              ×
-            </button>
-          </div>
-        )}
-        {error && (
-          <div className="alert error" role="alert">
-            {error}
+        <div hidden={!ownsWorkspace}>
+          <div className="annual-toolbar">
+            <div className="annual-tool-buttons">
+              <button
+                className="button"
+                disabled={!inputReady || busy}
+                onClick={() => setPasteOpen(true)}
+              >
+                <ClipboardPaste size={18} />표 붙여넣기
+              </button>
+              <button
+                className="button"
+                disabled={!inputReady || busy || workspace.year <= 2000}
+                onClick={() => setPreviousOpen(true)}
+              >
+                <Copy size={18} />
+                지난해 가져오기
+              </button>
+            </div>
             <span>
-              입력은 그대로 유지됩니다. 권한·연결·서버 상태를 확인한 뒤 다시
-              시도해 주세요.
+              {workspace.rows.length}행 · 등록 완료 {hiddenSaved}개 ·{" "}
+              {workspace.id
+                ? `개인 초안 개정 ${workspace.version}`
+                : "새 초안 (아직 서버 저장 전)"}
             </span>
           </div>
-        )}
-        <AnnualTable
-          rows={workspace.rows}
-          year={workspace.year}
-          venues={boot?.venues ?? []}
-          newRowOrganizationId={workspace.organizationId}
-          canAdd={inputReady}
-          publishedRowIds={workspace.publishedRowIds}
-          disabled={!mayEdit || busy}
-          onChange={changeRow}
-          onDelete={setDeleteId}
-          onDetails={setDetailsId}
-          onAdd={() => {
-            if (workspace.organizationId)
-              append([newAnnualRow(workspace.organizationId, workspace.year)]);
-          }}
-          onSaveNext={() => void saveNext()}
-        />
-        <footer className="annual-savebar">
-          <div>
-            <strong>
-              {busy
-                ? "서버에서 처리 중…"
-                : dirty
-                  ? "저장되지 않은 변경이 있어요"
-                  : workspace.id
-                    ? "개인 초안이 서버에 저장되어 있어요"
-                    : "서버에 보관하려면 초안 저장을 누르세요"}
-            </strong>
-            <span>초안은 공개 달력과 구글 구독에 나타나지 않아요.</span>
-          </div>
-          <div>
-            <button
-              className="button"
-              disabled={!inputReady || busy}
-              onClick={() => void save()}
-            >
-              <Save size={18} />
-              초안 저장
-            </button>
-            <button
-              className="button primary"
-              disabled={!inputReady || busy || !unresolvedCount}
-              onClick={() => void prepareReview()}
-            >
-              저장 후 등록 검토
-            </button>
-          </div>
-        </footer>
+          {notice && (
+            <div className="annual-status" role="status">
+              <Check size={18} />
+              <span>{notice}</span>
+              <button
+                className="icon-button"
+                aria-label="알림 닫기"
+                onClick={() => setNotice("")}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {error && (
+            <div className="alert error" role="alert">
+              {error}
+              <span>
+                입력은 그대로 유지됩니다. 권한·연결·서버 상태를 확인한 뒤 다시
+                시도해 주세요.
+              </span>
+            </div>
+          )}
+          <AnnualTable
+            rows={workspace.rows}
+            year={workspace.year}
+            venues={boot?.venues ?? []}
+            newRowOrganizationId={workspace.organizationId}
+            canAdd={inputReady}
+            publishedRowIds={workspace.publishedRowIds}
+            disabled={!mayEdit || busy}
+            onChange={changeRow}
+            onDelete={setDeleteId}
+            onDetails={setDetailsId}
+            onAdd={() => {
+              if (workspace.organizationId)
+                append([
+                  newAnnualRow(workspace.organizationId, workspace.year),
+                ]);
+            }}
+            onSaveNext={() => void saveNext()}
+          />
+          <footer className="annual-savebar">
+            <div>
+              <strong>
+                {busy
+                  ? "서버에서 처리 중…"
+                  : dirty
+                    ? "저장되지 않은 변경이 있어요"
+                    : workspace.id
+                      ? "개인 초안이 서버에 저장되어 있어요"
+                      : "서버에 보관하려면 초안 저장을 누르세요"}
+              </strong>
+              <span>초안은 공개 달력과 구글 구독에 나타나지 않아요.</span>
+            </div>
+            <div>
+              <button
+                className="button"
+                disabled={!inputReady || busy}
+                onClick={() => void save()}
+              >
+                <Save size={18} />
+                초안 저장
+              </button>
+              <button
+                className="button primary"
+                disabled={!inputReady || busy || !unresolvedCount}
+                onClick={() => void prepareReview()}
+              >
+                저장 후 등록 검토
+              </button>
+            </div>
+          </footer>
+        </div>
         <p className="annual-footer-note">
           입력자·일정수립일은 실제 등록 시 서버에서 기록합니다. 모든 행은 등록
           전까지 개인 초안이며, 날짜 미정 행은 계속 초안으로 남아요.
         </p>
       </main>
-      {detailRow && (
+      {ownsWorkspace && detailRow && (
         <RowDetails
           key={detailRow.id}
           row={detailRow}
@@ -701,7 +780,7 @@ export default function AnnualApp({
           onApply={changeRow}
         />
       )}
-      {pasteOpen && workspace.organizationId && (
+      {ownsWorkspace && pasteOpen && workspace.organizationId && (
         <PasteDialog
           year={workspace.year}
           organizationId={workspace.organizationId}
@@ -710,7 +789,7 @@ export default function AnnualApp({
           onAppend={append}
         />
       )}
-      {previousOpen && workspace.organizationId && actor && (
+      {ownsWorkspace && previousOpen && workspace.organizationId && actor && (
         <PreviousYearDialog
           targetYear={workspace.year}
           organizationId={workspace.organizationId}
@@ -719,7 +798,7 @@ export default function AnnualApp({
           onAppend={append}
         />
       )}
-      {reviews && (
+      {ownsWorkspace && reviews && (
         <ReviewDialog
           reviews={reviews}
           year={workspace.year}
@@ -731,74 +810,76 @@ export default function AnnualApp({
           onPublish={publish}
         />
       )}
-      <WorkspaceDialogs
-        workspace={workspace}
-        busy={busy}
-        inputReady={inputReady}
-        deleteId={deleteId}
-        yearTarget={yearTarget}
-        newOpen={newOpen}
-        resumeId={resumeId}
-        destination={guard.destination}
-        parkedDirtyCount={parkedDirtyCount}
-        conflict={conflict}
-        onCloseDelete={() => setDeleteId(null)}
-        onDelete={() => {
-          if (
-            deleteId &&
-            !busy &&
-            mayEdit &&
-            !workspace.publishedRowIds.includes(deleteId)
-          )
-            setWorkspace((p) => ({
-              ...p,
-              rows: p.rows.filter((r) => r.id !== deleteId),
-            }));
-          setDeleteId(null);
-        }}
-        onCloseNew={() => {
-          if (!busy) {
-            setYearTarget(null);
-            setNewOpen(false);
-          }
-        }}
-        onNew={() => startNew(yearTarget ?? workspace.year)}
-        onSaveNew={() => {
-          void (async () => {
-            const saved = await save();
-            if (saved) startNew(yearTarget ?? workspace.year, saved);
-          })();
-        }}
-        onCloseResume={() => {
-          if (!busy) setResumeId(null);
-        }}
-        onResume={() => {
-          if (resumeId) void resume(resumeId);
-        }}
-        onCancelLeave={guard.cancel}
-        onLeave={guard.leave}
-        onSaveLeave={() => {
-          void (async () => {
-            const saved = await save();
-            if (saved) {
-              if (parkedDirtyCount > 0) guard.cancel();
-              else guard.leave();
+      {ownsWorkspace && (
+        <WorkspaceDialogs
+          workspace={workspace}
+          busy={busy}
+          inputReady={inputReady}
+          deleteId={deleteId}
+          yearTarget={yearTarget}
+          newOpen={newOpen}
+          resumeId={resumeId}
+          destination={guard.destination}
+          parkedDirtyCount={parkedDirtyCount}
+          conflict={conflict}
+          onCloseDelete={() => setDeleteId(null)}
+          onDelete={() => {
+            if (
+              deleteId &&
+              !busy &&
+              mayEdit &&
+              !workspace.publishedRowIds.includes(deleteId)
+            )
+              setWorkspace((p) => ({
+                ...p,
+                rows: p.rows.filter((r) => r.id !== deleteId),
+              }));
+            setDeleteId(null);
+          }}
+          onCloseNew={() => {
+            if (!busy) {
+              setYearTarget(null);
+              setNewOpen(false);
             }
-          })();
-        }}
-        onCloseConflict={() => {
-          if (!conflict?.loading && !busy) setConflict(null);
-        }}
-        onInspectConflict={() => void inspectConflict()}
-        onLoadConflict={() => {
-          if (conflict?.latest) {
-            parkCurrent();
-            adopt(conflict.latest, crypto.randomUUID());
-            setConflict(null);
-          }
-        }}
-        onCopyConflict={() => void copyConflictAsNew()}
-      />
+          }}
+          onNew={() => startNew(yearTarget ?? workspace.year)}
+          onSaveNew={() => {
+            void (async () => {
+              const saved = await save();
+              if (saved) startNew(yearTarget ?? workspace.year, saved);
+            })();
+          }}
+          onCloseResume={() => {
+            if (!busy) setResumeId(null);
+          }}
+          onResume={() => {
+            if (resumeId) void resume(resumeId);
+          }}
+          onCancelLeave={guard.cancel}
+          onLeave={guard.leave}
+          onSaveLeave={() => {
+            void (async () => {
+              const saved = await save();
+              if (saved) {
+                if (parkedDirtyCount > 0) guard.cancel();
+                else guard.leave();
+              }
+            })();
+          }}
+          onCloseConflict={() => {
+            if (!conflict?.loading && !busy) setConflict(null);
+          }}
+          onInspectConflict={() => void inspectConflict()}
+          onLoadConflict={() => {
+            if (conflict?.latest) {
+              parkCurrent();
+              adopt(conflict.latest, crypto.randomUUID());
+              setConflict(null);
+            }
+          }}
+          onCopyConflict={() => void copyConflictAsNew()}
+        />
+      )}
     </div>
   );
 }

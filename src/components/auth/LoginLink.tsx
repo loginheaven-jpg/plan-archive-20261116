@@ -1,45 +1,35 @@
 "use client";
 
 import type { AnchorHTMLAttributes } from "react";
-import { usePathname } from "next/navigation";
-import { planLoginHref } from "@/domain/login";
+import { useAuth } from "./AuthProvider";
 
-/** One common login screen; keep the requested Plan page through authentication. */
+/** Ordinary login never navigates, including callers that used a new-tab anchor. */
 export default function LoginLink({
-  entry = "/api/auth/sso",
-  returnTo,
-  onClick,
-  ...props
+  children,
+  className,
+  title,
+  id,
+  style,
+  "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy,
 }: AnchorHTMLAttributes<HTMLAnchorElement> & {
   entry?: string;
   returnTo?: string;
 }) {
-  const pathname = usePathname();
+  const { openLogin } = useAuth();
   return (
-    <a
-      {...props}
-      href={planLoginHref(entry, returnTo ?? pathname)}
-      ref={(anchor) => {
-        if (anchor)
-          anchor.href = planLoginHref(
-            entry,
-            returnTo ??
-              window.location.pathname +
-                window.location.search +
-                window.location.hash,
-          );
-      }}
-      onClick={(event) => {
-        // Set the real query/hash before existing navigation guards inspect the link.
-        event.currentTarget.href = planLoginHref(
-          entry,
-          returnTo ??
-            window.location.pathname +
-              window.location.search +
-              window.location.hash,
-        );
-        onClick?.(event);
-      }}
-    />
+    <button
+      type="button"
+      className={className}
+      title={title}
+      id={id}
+      style={style}
+      aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
+      aria-haspopup="dialog"
+      onClick={openLogin}
+    >
+      {children}
+    </button>
   );
 }

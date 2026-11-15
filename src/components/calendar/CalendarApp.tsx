@@ -1,7 +1,13 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LoginLink from "@/components/auth/LoginLink";
-import { planLoginHref } from "@/domain/login";
+import { useAuth } from "@/components/auth/AuthProvider";
+import { eligibleSession } from "@/components/auth/client-session";
+import { AUTH_CHANGED_EVENT } from "@/domain/auth";
+import {
+  SessionScope,
+  type SessionLease,
+} from "@/components/auth/session-scope";
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -72,6 +78,13 @@ export default function CalendarApp({
   publicMode?: boolean;
 }) {
   const today = todayKST();
+  const {
+    session,
+    checking: authChecking,
+    error: authError,
+    openLogin,
+    logout,
+  } = useAuth();
   const [year, setYear] = useState(Number(today.slice(0, 4)));
   const [month, setMonth] = useState(Number(today.slice(5, 7)) - 1);
   const [view, setView] = useState<View>("month");
@@ -86,7 +99,14 @@ export default function CalendarApp({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [focusedDate, setFocusedDate] = useState<string | null>(null);
-  const [detail, setDetail] = useState<Occurrence | null>(null);
+  const [detailState, setDetailState] = useState<{
+    event: Occurrence;
+    lease: SessionLease;
+  } | null>(null);
+  const overlayScope = useRef(new SessionScope());
+  const [overlayEpoch, setOverlayEpoch] = useState(0);
+  const [changesLease, setChangesLease] = useState<SessionLease | null>(null);
+  const [trashLease, setTrashLease] = useState<SessionLease | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [emptyDate, setEmptyDate] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
@@ -102,15 +122,52 @@ export default function CalendarApp({
     event: Occurrence;
     kind: "cancel" | "delete";
     scope: EditScope;
+    lease: SessionLease;
   } | null>(null);
   const [actionReason, setActionReason] = useState("");
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState("");
   const [toast, setToast] = useState("");
   const [prefsReady, setPrefsReady] = useState(false);
-  const actor = publicMode ? null : (boot?.actor ?? null);
+  const [pendingCreateDate, setPendingCreateDate] = useState<string | null>(
+    null,
+  );
+  const actor =
+    !publicMode &&
+    !authError &&
+    eligibleSession(session) &&
+    boot?.actor?.id === session?.identity?.id
+      ? (boot?.actor ?? null)
+      : null;
+  const overlayOwner = publicMode
+    ? "public"
+    : actor
+      ? JSON.stringify({
+          id: actor.id,
+          role: actor.role,
+          departments: [...actor.departmentIds].sort(),
+        })
+      : "anonymous";
+  const currentOverlayOwner = useRef(overlayOwner);
+  useEffect(() => {
+    currentOverlayOwner.current = overlayOwner;
+  }, [overlayOwner]);
+  const detail =
+    detailState &&
+    detailState.lease.owner === overlayOwner &&
+    detailState.lease.generation === overlayEpoch
+      ? detailState.event
+      : null;
+  const setDetail = useCallback(
+    (event: Occurrence | null) =>
+      setDetailState(
+        event
+          ? { event, lease: overlayScope.current.capture(overlayOwner) }
+          : null,
+      ),
+    [overlayOwner],
+  );
   const mayCreate = !publicMode && canCreate(actor);
-  const loginReturnTo = `/${publicMode ? "share" : ""}?${new URLSearchParams({ year: String(year), month: String(month + 1), view, ...(detail ? { event: detail.id } : {}) })}`;
   const bootstrapURL = `/api/bootstrap?year=${year}${publicMode ? "&public=1" : ""}`;
   const loadGeneration = useRef(0);
   const reload = useCallback(
@@ -129,6 +186,25 @@ export default function CalendarApp({
   useEffect(() => {
     if (publicMode) return;
     const refreshSession = () => {
+      // Invalidate synchronously before any async bootstrap refresh can finish.
+      // EventEditor is separate and keeps its existing same-author unsaved form.
+      overlayScope.current.invalidate();
+      setOverlayEpoch((epoch) => epoch + 1);
+      setDetailState(null);
+      setChangesOpen(false);
+      setChanges([]);
+      setChangesLease(null);
+      setChangesError("");
+      setTrashOpen(false);
+      setTrash([]);
+      setTrashLease(null);
+      setAction(null);
+      setActionReason("");
+      setActionError("");
+      setActionPending(false);
+      setToast("");
+      setBoot(null);
+      setLoading(true);
       void reload().catch((error) =>
         setLoadError(
           error instanceof Error
@@ -137,9 +213,8 @@ export default function CalendarApp({
         ),
       );
     };
-    window.addEventListener("yebom:session-changed", refreshSession);
-    return () =>
-      window.removeEventListener("yebom:session-changed", refreshSession);
+    window.addEventListener(AUTH_CHANGED_EVENT, refreshSession);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, refreshSession);
   }, [publicMode, reload]);
   useEffect(() => {
     const controller = new AbortController();
@@ -238,17 +313,25 @@ export default function CalendarApp({
       return;
     }
     let active = true;
+    const lease = overlayScope.current.capture(currentOverlayOwner.current);
     api<{ event: CalendarEvent }>(
       `/api/events/${id.toLowerCase()}${publicMode ? "?public=1" : ""}`,
     )
       .then(({ event }) => {
-        if (!active) return;
+        if (
+          !active ||
+          !overlayScope.current.permits(lease, currentOverlayOwner.current)
+        )
+          return;
         const date = firstRecurrenceDate(event);
         if (!date) throw new Error("이 반복 범위에 실제 모임이 없어요.");
         setDetail(occurrenceForDate(event, date));
       })
       .catch((error) => {
-        if (active)
+        if (
+          active &&
+          overlayScope.current.permits(lease, currentOverlayOwner.current)
+        )
           setToast(
             error instanceof Error
               ? error.message
@@ -258,7 +341,7 @@ export default function CalendarApp({
     return () => {
       active = false;
     };
-  }, [prefsReady, publicMode]);
+  }, [prefsReady, publicMode, setDetail]);
   const allOccurrences = useMemo(
     () =>
       expandEvents(boot?.events ?? [], `${year}-01-01`, `${year}-12-31`).filter(
@@ -301,10 +384,22 @@ export default function CalendarApp({
   ).find((day) => day.date >= today);
   const openEditor = (date = today) => {
     if (mayCreate) setEditor({ date, scope: "series" });
-    else if (!actor && boot?.auth.loginUrl)
-      window.location.assign(planLoginHref(boot.auth.loginUrl, loginReturnTo));
-    else setAuthOpen(true);
+    else if (!actor && !publicMode) {
+      setPendingCreateDate(date);
+      openLogin();
+    } else setAuthOpen(true);
   };
+  useEffect(() => {
+    if (!pendingCreateDate || !actor || loading || loadError) return;
+    const date = pendingCreateDate;
+    queueMicrotask(() => {
+      setPendingCreateDate(null);
+      if (canCreate(actor)) {
+        setAuthOpen(false);
+        setEditor({ date, scope: "series" });
+      } else setAuthOpen(true);
+    });
+  }, [pendingCreateDate, actor, loading, loadError]);
   const onDate = (date: string) => {
     const decision = dateClickAction(visible, date, mayCreate);
     if (decision.type === "detail") setDetail(decision.occurrence);
@@ -332,6 +427,7 @@ export default function CalendarApp({
     operationId: string,
     reason: string,
   ) => {
+    const lease = overlayScope.current.capture(overlayOwner);
     const response = editor?.event
       ? await api<{ event: CalendarEvent; warnings: string[] }>(
           `/api/events/${editor.event.id}`,
@@ -352,6 +448,8 @@ export default function CalendarApp({
           method: "POST",
           body: JSON.stringify({ operationId, input }),
         });
+    if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+      return;
     setDetail(null);
     setBoot((previous) =>
       previous
@@ -366,12 +464,16 @@ export default function CalendarApp({
     );
     try {
       await reload();
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setToast(
         response.warnings.length
           ? `저장했어요. ${response.warnings.join(" ")}`
           : "일정을 저장했어요. 수립·변경 기록도 함께 보관했어요.",
       );
     } catch (e) {
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setToast(
         `저장은 완료됐지만 최신 목록 조회는 실패했어요. ${e instanceof Error ? e.message : "새로고침해 주세요."}`,
       );
@@ -389,10 +491,11 @@ export default function CalendarApp({
     setDetail(null);
   };
   const beginAction = (kind: "cancel" | "delete") => {
-    if (detail) {
+    if (detail && actor && canEditEvent(detail, actor)) {
       setAction({
         event: detail,
         kind,
+        lease: overlayScope.current.capture(overlayOwner),
         scope: detail.recurrence && kind === "cancel" ? "single" : "series",
       });
       setActionReason("");
@@ -401,7 +504,14 @@ export default function CalendarApp({
     }
   };
   const submitAction = async () => {
-    if (!action) return;
+    if (
+      !action ||
+      !actor ||
+      !canEditEvent(action.event, actor) ||
+      !overlayScope.current.permits(action.lease, overlayOwner)
+    )
+      return;
+    const lease = action.lease;
     setActionPending(true);
     setActionError("");
     try {
@@ -418,6 +528,8 @@ export default function CalendarApp({
             : {}),
         }),
       });
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setAction(null);
       setToast(
         action.kind === "cancel"
@@ -427,58 +539,95 @@ export default function CalendarApp({
       try {
         await reload();
       } catch {
+        if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+          return;
         setLoadError(
           "처리는 완료됐지만 최신 조회에 실패했어요. 새로고침해 주세요.",
         );
       }
     } catch (e) {
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setActionError(e instanceof Error ? e.message : "처리하지 못했어요.");
     } finally {
-      setActionPending(false);
+      if (overlayScope.current.permits(lease, currentOverlayOwner.current))
+        setActionPending(false);
     }
   };
   const openChanges = async () => {
+    const lease = overlayScope.current.capture(overlayOwner);
+    setChangesLease(lease);
+    setChanges([]);
     setChangesOpen(true);
     setChangesError("");
     try {
       const data = await api<{ changes: ChangeRecord[] }>(
         `/api/changes${publicMode ? "?public=1" : ""}`,
       );
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setChanges(data.changes);
     } catch (e) {
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setChangesError(
         e instanceof Error ? e.message : "변경 기록을 불러오지 못했어요.",
       );
     }
   };
   const openTrash = async () => {
+    if (!actor || !canCreate(actor)) return;
+    const lease = overlayScope.current.capture(overlayOwner);
+    setTrashLease(lease);
+    setTrash([]);
     setTrashOpen(true);
     try {
       const data = await api<{ events: CalendarEvent[] }>("/api/trash");
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setTrash(data.events);
     } catch (e) {
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setToast(e instanceof Error ? e.message : "휴지통을 불러오지 못했어요.");
     }
   };
   const restore = async (event: CalendarEvent) => {
+    if (
+      !actor ||
+      !canEditEvent(event, actor) ||
+      !overlayScope.current.permits(trashLease, overlayOwner)
+    )
+      return;
+    const lease = trashLease;
     if (!window.confirm(`‘${event.title}’ 일정을 복구할까요?`)) return;
+    if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+      return;
     try {
       await api(`/api/events/${event.id}`, {
         method: "PATCH",
         body: JSON.stringify({ version: event.version, action: "restore" }),
       });
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setTrash((items) => items.filter((e) => e.id !== event.id));
       setToast("일정을 복구했어요.");
       await reload();
     } catch (e) {
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setToast(e instanceof Error ? e.message : "복구하지 못했어요.");
     }
   };
   const openChangedEvent = async (change: ChangeRecord) => {
+    if (!overlayScope.current.permits(changesLease, overlayOwner)) return;
+    const lease = changesLease;
     try {
       const data = await api<{ event: CalendarEvent }>(
         `/api/events/${change.eventId}${publicMode ? "?public=1" : ""}`,
       );
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setChangesOpen(false);
       setDetail(
         occurrenceForDate(
@@ -487,6 +636,8 @@ export default function CalendarApp({
         ),
       );
     } catch (e) {
+      if (!overlayScope.current.permits(lease, currentOverlayOwner.current))
+        return;
       setToast(e instanceof Error ? e.message : "일정을 열지 못했어요.");
     }
   };
@@ -636,28 +787,24 @@ export default function CalendarApp({
               <span className="signed-user">
                 <i>{actor.name.slice(0, 1)}</i>
                 {actor.name}
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={authChecking}
+                  onClick={() => void logout()}
+                >
+                  로그아웃
+                </button>
               </span>
             ) : publicMode ? null : loading ? (
               <span className="muted" role="status">
                 로그인 확인 중…
               </span>
-            ) : boot?.auth.loginUrl ? (
-              <LoginLink
-                className="text-button login-button"
-                entry={boot.auth.loginUrl}
-                returnTo={loginReturnTo}
-              >
+            ) : (
+              <LoginLink className="text-button login-button">
                 <LogIn size={17} />
                 로그인
               </LoginLink>
-            ) : (
-              <button
-                className="text-button login-button"
-                onClick={() => setAuthOpen(true)}
-              >
-                <LogIn size={17} />
-                로그인
-              </button>
             )}
           </div>
         </header>
@@ -980,6 +1127,7 @@ export default function CalendarApp({
       </main>
       {detail && (
         <EventDetail
+          key={`${detail.id}:${overlayEpoch}`}
           event={detail}
           actor={actor}
           publicMode={publicMode}
@@ -1042,23 +1190,12 @@ export default function CalendarApp({
                 : (boot?.auth.message ??
                   "서버의 로그인 연결 상태를 확인하고 있어요.")}
             </div>
-            {boot?.auth.loginUrl && !actor ? (
-              <LoginLink
-                className="button primary"
-                entry={boot.auth.loginUrl}
-                returnTo={loginReturnTo}
-              >
+            {!actor ? (
+              <LoginLink className="button primary">
                 <LogIn size={18} />
                 로그인
               </LoginLink>
-            ) : (
-              !actor && (
-                <p className="muted">
-                  운영 도메인과 최초 일정 관리자 연결이 필요해요. 가상
-                  로그인이나 개발용 관리자 계정을 만들지 않습니다.
-                </p>
-              )
-            )}
+            ) : null}
             <a className="text-button" href="/settings">
               관리자 설정·연결 안내 <ArrowRight size={16} />
             </a>
@@ -1169,146 +1306,160 @@ export default function CalendarApp({
           </div>
         </Dialog>
       )}
-      {changesOpen && (
-        <Dialog
-          title="최근 변경"
-          description="시간·장소 변경과 취소를 놓치지 않도록 모았어요."
-          onClose={() => setChangesOpen(false)}
-        >
-          <div className="dialog-body">
-            {changesError && <p className="alert error">{changesError}</p>}
-            {!changes.length && !changesError && (
-              <p className="muted">볼 수 있는 최근 변경 기록이 없어요.</p>
-            )}
-            <div className="recent-list">
-              {changes.map((change) => (
-                <button
-                  key={change.id}
-                  onClick={() => void openChangedEvent(change)}
-                >
-                  <span className="change-kind">
-                    {kindNames[change.kind] ?? "일정 변경"}
-                  </span>
-                  <strong>{change.title}</strong>
-                  <small>
-                    {stamp(change.at)}
-                    {change.by && ` · ${change.by.name}`}
-                  </small>
-                  <span>
-                    {change.changedFields
-                      .map((f) => fieldNames[f] ?? f)
-                      .join(" · ")}
-                  </span>
-                  {change.reason && <p>{change.reason}</p>}
-                </button>
+      {changesOpen &&
+        changesLease?.owner === overlayOwner &&
+        changesLease.generation === overlayEpoch && (
+          <Dialog
+            title="최근 변경"
+            description="시간·장소 변경과 취소를 놓치지 않도록 모았어요."
+            onClose={() => setChangesOpen(false)}
+          >
+            <div className="dialog-body">
+              {changesError && <p className="alert error">{changesError}</p>}
+              {!changes.length && !changesError && (
+                <p className="muted">볼 수 있는 최근 변경 기록이 없어요.</p>
+              )}
+              <div className="recent-list">
+                {changes.map((change) => (
+                  <button
+                    key={change.id}
+                    onClick={() => void openChangedEvent(change)}
+                  >
+                    <span className="change-kind">
+                      {kindNames[change.kind] ?? "일정 변경"}
+                    </span>
+                    <strong>{change.title}</strong>
+                    <small>
+                      {stamp(change.at)}
+                      {change.by && ` · ${change.by.name}`}
+                    </small>
+                    <span>
+                      {change.changedFields
+                        .map((f) => fieldNames[f] ?? f)
+                        .join(" · ")}
+                    </span>
+                    {change.reason && <p>{change.reason}</p>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </Dialog>
+        )}
+      {trashOpen &&
+        trashLease?.owner === overlayOwner &&
+        trashLease.generation === overlayEpoch && (
+          <Dialog
+            title="일정 휴지통"
+            description="담당 권한이 있는 삭제 일정만 표시해요."
+            onClose={() => setTrashOpen(false)}
+          >
+            <div className="dialog-body">
+              {!trash.length && (
+                <p className="muted">휴지통에 일정이 없어요.</p>
+              )}
+              {trash.map((event) => (
+                <div className="trash-row" key={event.id}>
+                  <div>
+                    <strong>{event.title}</strong>
+                    <small>
+                      {organization(event.organizationId).name} ·{" "}
+                      {event.startDate}
+                    </small>
+                  </div>
+                  <button
+                    className="button"
+                    onClick={() => void restore(event)}
+                  >
+                    복구
+                  </button>
+                </div>
               ))}
             </div>
-          </div>
-        </Dialog>
-      )}
-      {trashOpen && (
-        <Dialog
-          title="일정 휴지통"
-          description="담당 권한이 있는 삭제 일정만 표시해요."
-          onClose={() => setTrashOpen(false)}
-        >
-          <div className="dialog-body">
-            {!trash.length && <p className="muted">휴지통에 일정이 없어요.</p>}
-            {trash.map((event) => (
-              <div className="trash-row" key={event.id}>
-                <div>
-                  <strong>{event.title}</strong>
-                  <small>
-                    {organization(event.organizationId).name} ·{" "}
-                    {event.startDate}
-                  </small>
-                </div>
-                <button className="button" onClick={() => void restore(event)}>
-                  복구
-                </button>
-              </div>
-            ))}
-          </div>
-        </Dialog>
-      )}
-      {action && (
-        <Dialog
-          title={
-            action.kind === "cancel" ? "일정 취소 처리" : "휴지통으로 이동"
-          }
-          onClose={() => {
-            if (!actionPending) setAction(null);
-          }}
-        >
-          <div className="dialog-body">
-            <h3>{action.event.title}</h3>
-            {action.event.recurrence && action.kind === "cancel" && (
+          </Dialog>
+        )}
+      {action &&
+        action.lease.owner === overlayOwner &&
+        action.lease.generation === overlayEpoch && (
+          <Dialog
+            title={
+              action.kind === "cancel" ? "일정 취소 처리" : "휴지통으로 이동"
+            }
+            onClose={() => {
+              if (!actionPending) setAction(null);
+            }}
+          >
+            <div className="dialog-body">
+              <h3>{action.event.title}</h3>
+              {action.event.recurrence && action.kind === "cancel" && (
+                <label className="field">
+                  <span>취소 범위</span>
+                  <select
+                    value={action.scope}
+                    disabled={actionPending}
+                    onChange={(e) =>
+                      setAction({
+                        ...action,
+                        scope: e.target.value as EditScope,
+                      })
+                    }
+                  >
+                    <option value="single">이번 회차만</option>
+                    <option value="series">반복 전체</option>
+                  </select>
+                </label>
+              )}
+              {action.kind === "delete" && (
+                <p className="alert">
+                  반복 일정은 시리즈 전체를 휴지통에 보관해요. 한 회차만
+                  없애려면 ‘취소 처리’를 사용하세요.
+                </p>
+              )}
               <label className="field">
-                <span>취소 범위</span>
-                <select
-                  value={action.scope}
+                <span>
+                  {action.kind === "cancel"
+                    ? "취소 이유 · 필수"
+                    : "삭제 이유 · 선택"}
+                </span>
+                <textarea
+                  maxLength={500}
+                  rows={3}
+                  value={actionReason}
                   disabled={actionPending}
-                  onChange={(e) =>
-                    setAction({ ...action, scope: e.target.value as EditScope })
-                  }
-                >
-                  <option value="single">이번 회차만</option>
-                  <option value="series">반복 전체</option>
-                </select>
+                  onChange={(e) => setActionReason(e.target.value)}
+                />
               </label>
-            )}
-            {action.kind === "delete" && (
-              <p className="alert">
-                반복 일정은 시리즈 전체를 휴지통에 보관해요. 한 회차만 없애려면
-                ‘취소 처리’를 사용하세요.
-              </p>
-            )}
-            <label className="field">
-              <span>
-                {action.kind === "cancel"
-                  ? "취소 이유 · 필수"
-                  : "삭제 이유 · 선택"}
-              </span>
-              <textarea
-                maxLength={500}
-                rows={3}
-                value={actionReason}
+              {actionError && (
+                <p className="alert error" role="alert">
+                  {actionError}
+                </p>
+              )}
+            </div>
+            <footer className="dialog-actions">
+              <button
+                className="button"
                 disabled={actionPending}
-                onChange={(e) => setActionReason(e.target.value)}
-              />
-            </label>
-            {actionError && (
-              <p className="alert error" role="alert">
-                {actionError}
-              </p>
-            )}
-          </div>
-          <footer className="dialog-actions">
-            <button
-              className="button"
-              disabled={actionPending}
-              onClick={() => setAction(null)}
-            >
-              돌아가기
-            </button>
-            <button
-              className="button danger"
-              disabled={
-                actionPending ||
-                (action.kind === "cancel" && !actionReason.trim())
-              }
-              onClick={() => void submitAction()}
-            >
-              <Ban size={17} />
-              {actionPending
-                ? "처리 중…"
-                : action.kind === "cancel"
-                  ? "취소 기록 남기기"
-                  : "휴지통으로 이동"}
-            </button>
-          </footer>
-        </Dialog>
-      )}
+                onClick={() => setAction(null)}
+              >
+                돌아가기
+              </button>
+              <button
+                className="button danger"
+                disabled={
+                  actionPending ||
+                  (action.kind === "cancel" && !actionReason.trim())
+                }
+                onClick={() => void submitAction()}
+              >
+                <Ban size={17} />
+                {actionPending
+                  ? "처리 중…"
+                  : action.kind === "cancel"
+                    ? "취소 기록 남기기"
+                    : "휴지통으로 이동"}
+              </button>
+            </footer>
+          </Dialog>
+        )}
       {toast && (
         <div className="toast" role="status">
           <Check size={18} />

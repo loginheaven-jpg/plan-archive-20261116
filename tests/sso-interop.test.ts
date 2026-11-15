@@ -12,7 +12,7 @@ vi.mock("../src/db/client", () => ({ getDB: vi.fn() }));
 vi.mock("../src/server/services", () => ({ bootstrap: vi.fn(async (_request: Request, actor: unknown) => ({ actor })) }));
 const origin = "https://plan.yebom.org";
 const password = "isolated-offline-sso-password-at-least-32-characters";
-const currentUser = { user_id: "isolated-user", name: "격리된 교인", is_approved: true, needs_profile_completion: false, finance_role: "super_admin", permission_level: "admin", email: "private@example.invalid", group_id: "private-group", privateignored: "private-claim" };
+const currentUser = { user_id: "isolated-user", name: "격리된 교인", is_approved: true, needs_profile_completion: false, password_reset_required: false, finance_role: "super_admin", permission_level: "admin", email: "private@example.invalid", group_id: "private-group", privateignored: "private-claim" };
 const fetchStub = vi.fn<typeof fetch>();
 function req(path = "/api/auth/checkin", cookie: string | null = `${SAINT_COOKIE}=opaque-current-seal`, headers: Record<string, string> = {}) {
   return new Request(`${origin}${path}`, { headers: { host: "plan.yebom.org", "sec-fetch-site": "same-origin", ...(cookie === null ? {} : { cookie }), ...headers } });
@@ -227,7 +227,7 @@ describe("safe central cookie propagation and check-in privacy", () => {
     fetchStub.mockResolvedValue(response(undefined, 200, [deletion, renewed, "finance-session=private; Path=/; Secure; HttpOnly", "prayer_session=private; Path=/; Secure; HttpOnly"]));
     const result = await checkin(req());
     expect(result.status).toBe(200);
-    expect(await result.json()).toEqual({ authenticated: true, state: "authenticated", message: expect.any(String) });
+    expect(await result.json()).toEqual({ authenticated: true, state: "authenticated", identity: { id: currentUser.user_id, name: currentUser.name }, profileCompletionRequired: false, passwordResetRequired: false, profileMissingFields: [], message: expect.any(String) });
     expect(result.headers.getSetCookie()).toEqual([deletion, renewed]);
     expect(result.headers.get("cache-control")).toContain("no-store");
     expect(result.headers.get("access-control-allow-origin")).toBeNull();
@@ -237,7 +237,7 @@ describe("safe central cookie propagation and check-in privacy", () => {
     fetchStub.mockResolvedValue(response({ isLoggedIn: false, reason: "revoked", private: "secret" }, 401, [deletion, sharedDeletion, "finance-session=; Path=/; Max-Age=0; Secure; HttpOnly"]));
     const result = await checkin(req());
     expect(result.status).toBe(401);
-    expect(await result.json()).toEqual({ authenticated: false, state: "revoked", message: expect.any(String) });
+    expect(await result.json()).toEqual({ authenticated: false, state: "revoked", identity: null, profileCompletionRequired: false, passwordResetRequired: false, profileMissingFields: [], message: expect.any(String) });
     expect(result.headers.getSetCookie()).toEqual([deletion, sharedDeletion]);
     expect(getDB).not.toHaveBeenCalled();
   });

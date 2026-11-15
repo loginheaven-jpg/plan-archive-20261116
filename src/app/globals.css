@@ -2273,3 +2273,88 @@ hr {
     display: none !important;
   }
 }
+
+/* Same-page shared church login; native top layer stays above open editors. */
+.auth-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  transform: none;
+  border: 1px solid var(--line);
+  padding: 0;
+  color: var(--ink);
+  font-size: 16px;
+  max-height: calc(100dvh - 32px);
+}
+.auth-dialog:not([open]) {
+  display: none;
+}
+.auth-dialog::backdrop {
+  background: #0a281d66;
+  backdrop-filter: blur(3px);
+}
+.auth-dialog .dialog-heading p,
+.auth-dialog-body > p,
+.auth-dialog .muted {
+  font-size: 14px;
+}
+.auth-login-form,
+.auth-completion {
+  display: grid;
+  gap: 16px;
+}
+.auth-login-form p,
+.auth-completion p {
+  margin: 0;
+}
+.auth-login-form > .button {
+  width: 100%;
+}
+.auth-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.auth-status svg {
+  flex-shrink: 0;
+}
+.auth-stage {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  display: grid;
+  gap: 12px;
+}
+.auth-stage h3 {
+  font-size: 18px;
+  margin: 0;
+}
+.auth-stage .button {
+  white-space: normal;
+  text-align: center;
+}
+.auth-checkin-notice {
+  margin: 0;
+  border-radius: 0;
+}
+@media (max-width: 760px) {
+  .auth-dialog {
+    max-width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+  }
+  .auth-dialog .button {
+    min-height: 48px;
+  }
+}
+@media print {
+  .auth-dialog,
+  .auth-checkin-notice {
+    display: none !important;
+  }
+}
+
+.auth-dialog {
+  pointer-events: auto;
+  height: fit-content;
+}
