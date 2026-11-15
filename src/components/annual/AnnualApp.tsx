@@ -80,6 +80,7 @@ export default function AnnualApp({
   const [newOpen, setNewOpen] = useState(false);
   const [conflict, setConflict] = useState<DraftConflict | null>(null);
   const initialOrgApplied = useRef(false);
+  const loadGeneration = useRef(0);
   const actor = boot?.actor ?? null;
   const allowedIds = useMemo(
     () =>
@@ -106,93 +107,72 @@ export default function AnnualApp({
     const data = await api<Bootstrap>(`/api/bootstrap?year=${year}`);
     return data;
   }, []);
-  useEffect(() => {
-    let active = true;
-    load(workspace.year)
-      .then(async (data) => {
-        if (!active) return;
-        setBoot(data);
-        setLoadError("");
-        setLoading(false);
-        const allowed =
-          data.actor && canCreate(data.actor)
-            ? data.actor.role === "admin"
-              ? ORGANIZATIONS.map((o) => o.id)
-              : data.actor.departmentIds
-            : [];
-        if (!initialOrgApplied.current) {
-          initialOrgApplied.current = true;
-          if (initialOrganization && allowed.includes(initialOrganization))
-            setWorkspace((p) => ({
-              ...p,
-              organizationId: initialOrganization,
-            }));
-          else if (initialOrganization)
-            setNotice(
-              "전달된 부서에 입력 권한이 없어요. 담당 부서를 직접 선택해 주세요.",
-            );
-        }
-        if (!data.actor || !canCreate(data.actor)) {
-          setDrafts([]);
-          return;
-        }
-        try {
-          const result = await listDrafts(workspace.year);
-          if (active) {
-            setDrafts(
-              result.drafts.filter((draft) => draft.ownerId === data.actor?.id),
-            );
-            setDraftError("");
-          }
-        } catch (e) {
-          if (active) {
-            setDrafts([]);
-            setDraftError(
-              e instanceof Error ? e.message : "초안 목록을 읽지 못했어요.",
-            );
-          }
-        }
-      })
-      .catch((e) => {
-        if (active) {
-          setBoot(null);
-          setDrafts([]);
-          setLoadError(
-            e instanceof Error ? e.message : "연결을 확인해 주세요.",
-          );
-          setLoading(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [workspace.year, initialOrganization, load]);
-
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (busyRef.current) return;
+    const generation = ++loadGeneration.current;
+    const current = () => generation === loadGeneration.current;
+    // Drop account-scoped data before awaiting; the unsaved workspace stays separate.
+    setDrafts([]);
+    setDraftError("");
+    setBoot(null);
     setLoading(true);
     try {
       const data = await load(workspace.year);
+      if (!current()) return;
       setBoot(data);
       setLoadError("");
+      const allowed =
+        data.actor && canCreate(data.actor)
+          ? data.actor.role === "admin"
+            ? ORGANIZATIONS.map((o) => o.id)
+            : data.actor.departmentIds
+          : [];
+      if (!initialOrgApplied.current) {
+        initialOrgApplied.current = true;
+        if (initialOrganization && allowed.includes(initialOrganization))
+          setWorkspace((p) => ({ ...p, organizationId: initialOrganization }));
+        else if (initialOrganization)
+          setNotice(
+            "전달된 부서에 입력 권한이 없어요. 담당 부서를 직접 선택해 주세요.",
+          );
+      }
       if (data.actor && canCreate(data.actor)) {
         try {
           const result = await listDrafts(workspace.year);
+          if (!current()) return;
           setDrafts(result.drafts.filter((d) => d.ownerId === data.actor?.id));
           setDraftError("");
         } catch (e) {
-          setDraftError(
-            e instanceof Error ? e.message : "초안 목록을 읽지 못했어요.",
-          );
+          if (current())
+            setDraftError(
+              e instanceof Error ? e.message : "초안 목록을 읽지 못했어요.",
+            );
         }
-      } else setDrafts([]);
+      }
     } catch (e) {
-      setBoot(null);
-      setLoadError(e instanceof Error ? e.message : "연결을 확인해 주세요.");
+      if (current()) {
+        setBoot(null);
+        setLoadError(e instanceof Error ? e.message : "연결을 확인해 주세요.");
+      }
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
-  };
+  }, [load, workspace.year, initialOrganization]);
+
+  useEffect(() => {
+    const refreshSession = () => void refresh();
+    const invalidate = () => {
+      ++loadGeneration.current;
+    };
+    void refresh();
+    window.addEventListener("yebom:session-changed", refreshSession);
+    return () => {
+      // Invalidate initial, manual, and session requests on unmount/year change.
+      invalidate();
+      window.removeEventListener("yebom:session-changed", refreshSession);
+    };
+  }, [refresh]);
+
   const parkCurrent = (current = workspace) => {
     if (current.rows.length || current.id)
       setParked((p) => [...p.filter((w) => w.key !== current.key), current]);

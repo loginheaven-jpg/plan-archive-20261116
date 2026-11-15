@@ -300,9 +300,11 @@ export default function RowDetails({
                   })
                 }
               >
-                <option value="members">로그인 성도에게만 (기본)</option>
+                <option value="members">로그인 성도에게만 · 제한 일정</option>
                 <option value="department">주관부서 담당자에게만</option>
-                <option value="public">전체 공개 · 구글 구독 포함</option>
+                <option value="public">
+                  전체 공개 · 로그인 없이 열람 (기본)
+                </option>
               </select>
             </label>
           </div>

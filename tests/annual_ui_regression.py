@@ -33,6 +33,7 @@ def intercept(route, request):
     if path=='/api/bootstrap':
         payload={'events':list(EVENTS.values()),'upcoming':[],'actor':ACTOR,'venues':[],'settings':SETTINGS,
                  'auth':{'configured':True,'onSharedDomain':False,'loginUrl':None,'message':'격리 API 응답'}}
+    elif path=='/api/auth/checkin':payload={'authenticated':True,'state':'authenticated'}
     elif path=='/api/annual' and method=='GET':
         payload={'drafts':[summary(d) for d in DRAFTS.values()]}
     elif path=='/api/annual' and method=='POST':

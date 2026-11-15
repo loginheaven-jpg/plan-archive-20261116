@@ -119,7 +119,7 @@ export default function AnnualSidebar({
         <span>
           새 행 기본값
           <br />
-          <strong>로그인 성도 공개 · 선택 부서 대상</strong>
+          <strong>로그인 없이 열람 · 선택 부서 대상</strong>
         </span>
       </div>
       <button className="button" disabled={!inputReady || busy} onClick={onNew}>

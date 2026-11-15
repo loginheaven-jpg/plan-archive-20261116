@@ -42,6 +42,7 @@ def intercept(route, request, actor=ACTOR):
                 value['createdBy'] = None; value['updatedBy'] = None; value['internalNote'] = ''
         payload = {'events': projected, 'upcoming': [], 'actor': actor, 'venues': [], 'settings': SETTINGS,
                    'auth': {'configured': False, 'onSharedDomain': False, 'loginUrl': None, 'message': '격리 검사 응답'}}
+    elif '/api/auth/checkin' in url: payload = {'authenticated': actor is not None, 'state': 'authenticated' if actor else 'anonymous'}
     elif '/api/events/' in url:
         key = url.split('/api/events/')[1].split('?')[0]
         payload = {'event': next(e for e in EVENTS if e['id']==key), 'history': []}

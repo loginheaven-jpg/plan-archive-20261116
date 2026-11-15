@@ -116,6 +116,21 @@ export default function CalendarApp({
     return data;
   }, [bootstrapURL]);
   useEffect(() => {
+    if (publicMode) return;
+    const refreshSession = () => {
+      void reload().catch((error) =>
+        setLoadError(
+          error instanceof Error
+            ? error.message
+            : "로그인 상태를 다시 확인해 주세요.",
+        ),
+      );
+    };
+    window.addEventListener("yebom:session-changed", refreshSession);
+    return () =>
+      window.removeEventListener("yebom:session-changed", refreshSession);
+  }, [publicMode, reload]);
+  useEffect(() => {
     let active = true;
     api<Bootstrap>(bootstrapURL)
       .then((data) => {
@@ -637,7 +652,7 @@ export default function CalendarApp({
             <p>
               {publicMode
                 ? "전체 공개 일정만 표시해요. 로그인 없이 함께 볼 수 있어요."
-                : "교회와 부서의 약속을 한곳에서 확인하고 나누세요."}
+                : "로그인 없이 일정을 볼 수 있어요. 입력·수정할 때만 교적부로 로그인하세요."}
             </p>
           </div>
           <div className="heading-actions">
@@ -957,7 +972,7 @@ export default function CalendarApp({
           onAction={beginAction}
         />
       )}
-      {editor && actor && (
+      {editor && (
         <EventEditor
           key={`${editor.event?.id ?? "new"}:${editor.date}:${editor.scope}`}
           date={editor.date}

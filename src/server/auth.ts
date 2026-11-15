@@ -4,8 +4,9 @@ import { getDB } from "../db/client";
 import { users, settings } from "../db/schema";
 import type { Actor, AuthStatus, Person } from "../domain/types";
 import { APIError } from "./validation";
+import { cookieValue, saintResult, validateSaintSession, type SaintSession } from "./saint-session";
 
-export const SAINT_COOKIE = "saint_record_session";
+export { SAINT_COOKIE, cookieValue } from "./saint-session";
 export const LOGOUT_MARKER = "yebom_plan_logged_out";
 export function publicOrigin(): string | null {
   const raw = process.env.APP_PUBLIC_ORIGIN;
@@ -23,16 +24,13 @@ function requestOrigin(request: Request): string | null {
 export function authStatus(request: Request): AuthStatus {
   const origin = publicOrigin();
   const current = requestOrigin(request);
-  const configured = !!secret() && !!origin;
+  const configured = !!origin;
   const onSharedDomain = !!origin && current === origin;
-  const loginUrl = configured && onSharedDomain ? `https://saint.yebom.org/login?from=plan&redirect=${encodeURIComponent(`${origin}/api/auth/sso`)}` : null;
-  return { configured, onSharedDomain, loginUrl, message: !secret() ? "교적부 SSO 검증키가 아직 연결되지 않았습니다. 공개 일정만 볼 수 있어요." : !origin ? "신뢰할 수 있는 운영 HTTPS 주소가 아직 설정되지 않았습니다." : !onSharedDomain ? "Manus Preview 등 다른 도메인에서는 교적부 공유 쿠키를 받을 수 없습니다. 운영 도메인에서 로그인하세요." : "기존 교적부 계정으로 로그인합니다. 일정 권한은 별도로 부여됩니다." };
+  const loginUrl = configured && onSharedDomain ? `${origin}/api/auth/sso` : null;
+  return { configured, onSharedDomain, loginUrl, message: !origin ? "신뢰할 수 있는 운영 HTTPS 주소가 아직 설정되지 않았습니다." : !onSharedDomain ? "Manus Preview 등 다른 도메인에서는 교적부 공유 쿠키를 받을 수 없습니다. 운영 도메인에서 로그인하세요." : "기존 교적부 계정의 현재 세션을 교적부 서버에서 확인합니다. 공유 쿠키 도메인 .yebom.org가 필요하며 일정 권한은 별도로 부여됩니다." };
 }
-export function cookieValue(request: Request, name: string): string | null {
-  const values = (request.headers.get("cookie") ?? "").split(";").map(v => v.trim()).filter(v => v.startsWith(`${name}=`));
-  if (values.length !== 1) return null;
-  try { return decodeURIComponent(values[0].slice(name.length + 1)); } catch { return null; }
-}
+// Legacy seal inspection is retained only for offline interoperability tests.
+// Active authentication must never call it, including on a central outage.
 export async function verifySaintCookie(seal: string | null, password: string | null = secret()): Promise<Person | null> {
   if (!seal || seal.length > 16000 || !password || password.length < 32) return null;
   // iron-session's version parser uses parseInt; reject trailing garbage instead of accepting ~2forged.
@@ -43,13 +41,25 @@ export async function verifySaintCookie(seal: string | null, password: string | 
     return { id: data.user_id, name: data.name.trim() };
   } catch { return null; }
 }
-export async function verifiedPerson(request: Request): Promise<Person | null> {
+export interface AuthOptions { allowLogoutMarker?: boolean }
+export async function saintSessionFor(request: Request, options: AuthOptions = {}): Promise<SaintSession> {
   const status = authStatus(request);
-  if (!status.configured || !status.onSharedDomain || cookieValue(request, LOGOUT_MARKER) === "1") return null;
-  return verifySaintCookie(cookieValue(request, SAINT_COOKIE));
+  if (!status.configured) return saintResult("not_configured");
+  if (!status.onSharedDomain) return saintResult("wrong_origin");
+  // Treat malformed/ambiguous local logout markers as logged out too.
+  const hasMarker = (request.headers.get("cookie") ?? "").split(";").some(part => part.trim().startsWith(`${LOGOUT_MARKER}=`));
+  if (!options.allowLogoutMarker && hasMarker && cookieValue(request, LOGOUT_MARKER) !== "") return saintResult("logged_out");
+  return validateSaintSession(request);
 }
-export async function actorFor(request: Request): Promise<Actor | null> {
-  const person = await verifiedPerson(request);
+export async function verifiedPerson(request: Request, options: AuthOptions = {}): Promise<Person | null> {
+  const session = await saintSessionFor(request, options);
+  if (session.state === "unavailable") throw new APIError(503, "SAINT_UNAVAILABLE", session.message);
+  if (session.state === "profile_incomplete") throw new APIError(403, "PROFILE_COMPLETION_REQUIRED", session.message);
+  if (session.state === "not_approved") throw new APIError(403, "SAINT_APPROVAL_REQUIRED", session.message);
+  return session.person;
+}
+export async function actorFor(request: Request, options: AuthOptions = {}): Promise<Actor | null> {
+  const person = await verifiedPerson(request, options);
   if (!person) return null;
   const adminIds = new Set((process.env.YEBOM_CALENDAR_ADMIN_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean));
   // Serialize first-login grants with settings/user admin mutations. Existing roles are never re-granted from env.

@@ -40,7 +40,7 @@ function dates(e: CalendarEvent, from: string, to: string): string[] {
 afterEach(() => vi.restoreAllMocks());
 
 describe("annual row defaults and deterministic dates", () => {
-  it("creates distinct stable UUIDs with empty dates and member/department defaults", () => {
+  it("creates distinct stable UUIDs with empty dates and public/department defaults", () => {
     const a = newAnnualRow("young", 2027);
     const b = newAnnualRow("young", 2027);
     expect(a.id).toMatch(/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/);
@@ -48,7 +48,7 @@ describe("annual row defaults and deterministic dates", () => {
     expect(a).toMatchObject({ dateText: "", input: {
       organizationId: "young", startDate: "", endDate: "", allDay: true,
       startTime: null, endTime: null, audience: "departments", audienceIds: ["young"],
-      visibility: "members", recurrence: null,
+      visibility: "public", recurrence: null,
     } });
     expect(() => newAnnualRow("young", 2201)).toThrow();
     const r = row("1/10");

@@ -8,6 +8,7 @@ import type {
   OrganizationId,
 } from "@/domain/types";
 import { ORGANIZATIONS, organization } from "@/domain/organizations";
+import { canCreate, canEditEvent } from "@/domain/permissions";
 import Dialog from "./Dialog";
 import RecurrenceFields from "./RecurrenceFields";
 import DateExpressionField from "./DateExpressionField";
@@ -16,7 +17,7 @@ import { Save, UserRound, ChevronDown } from "lucide-react";
 export type EditScope = "single" | "series";
 function initialInput(
   date: string,
-  actor: Actor,
+  actor: Actor | null,
   event?: CalendarEvent | Occurrence,
   defaultOrganizationId?: OrganizationId,
 ): EventInput {
@@ -41,10 +42,10 @@ function initialInput(
     };
   const department =
     defaultOrganizationId &&
-    (actor.role === "admin" ||
-      actor.departmentIds.includes(defaultOrganizationId))
+    (actor?.role === "admin" ||
+      actor?.departmentIds.includes(defaultOrganizationId))
       ? defaultOrganizationId
-      : (actor.departmentIds[0] ?? "worship");
+      : (actor?.departmentIds[0] ?? "worship");
   return {
     title: "",
     organizationId: department,
@@ -75,7 +76,7 @@ export default function EventEditor({
   onSave,
 }: {
   date: string;
-  actor: Actor;
+  actor: Actor | null;
   event?: CalendarEvent | Occurrence;
   scope: EditScope;
   venues: Venue[];
@@ -90,6 +91,14 @@ export default function EventEditor({
   const [form, setForm] = useState(() =>
     initialInput(date, actor, event, defaultOrganizationId),
   );
+  // This snapshot identifies the owner of the in-memory form; it never grants
+  // write authority. Save permissions always use the current actor below.
+  const [draftAuthorId] = useState(actor?.id ?? null);
+  const authorized =
+    !!actor &&
+    actor.id === draftAuthorId &&
+    (event ? canEditEvent(event, actor) : canCreate(actor)) &&
+    canEditEvent(form, actor);
   const [original, setOriginal] = useState(JSON.stringify(form));
   const operationId = useRef(crypto.randomUUID());
   const [reason, setReason] = useState("");
@@ -121,12 +130,18 @@ export default function EventEditor({
   const update = <K extends keyof EventInput>(key: K, value: EventInput[K]) =>
     setForm((previous) => ({ ...previous, [key]: value }));
   const allowed =
-    actor.role === "admin"
+    actor?.role === "admin"
       ? ORGANIZATIONS
-      : ORGANIZATIONS.filter((o) => actor.departmentIds.includes(o.id));
+      : ORGANIZATIONS.filter((o) => actor?.departmentIds.includes(o.id));
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    if (!authorized) {
+      setError(
+        "같은 계정의 현재 편집 권한을 확인해야 저장할 수 있어요. 입력은 보관되어 있어요.",
+      );
+      return;
+    }
     if (dateExpressionDirty) {
       setError("날짜 표현을 먼저 적용하거나 지운 뒤 등록해 주세요.");
       return;
@@ -182,7 +197,36 @@ export default function EventEditor({
       onClose={close}
     >
       <form onSubmit={submit} className="event-form">
-        <fieldset disabled={pending}>
+        {!authorized && (
+          <div className="alert" role="status">
+            <p>
+              로그인 또는 편집 권한을 다시 확인해 주세요. 작성 중인 입력은
+              보관되어 있으며 같은 계정으로 돌아오면 이어 쓸 수 있어요.
+            </p>
+            <a
+              className="button"
+              href="/api/auth/sso"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              새 창에서 교적부 로그인
+            </a>
+            <button
+              type="button"
+              className="button"
+              onClick={() =>
+                window.dispatchEvent(new Event("yebom:check-session"))
+              }
+            >
+              로그인 상태 다시 확인
+            </button>
+          </div>
+        )}
+        <fieldset
+          disabled={pending || !authorized}
+          hidden={!authorized}
+          style={authorized ? undefined : { display: "none" }}
+        >
           {resuming && (
             <div className="alert">
               <strong>현재 취소된 일정입니다.</strong>
@@ -471,7 +515,7 @@ export default function EventEditor({
           <div className="author-note">
             <UserRound size={18} />
             <span>
-              입력자 <strong>{actor.name}</strong> ·{" "}
+              입력자 <strong>{actor?.name ?? "로그인 확인 필요"}</strong> ·{" "}
               {event
                 ? "최초 입력 기록은 보존하고 변경자를 기록해요."
                 : "일정수립일은 서버의 최초 등록일로 자동 기록해요."}
@@ -508,7 +552,9 @@ export default function EventEditor({
             type="submit"
             className="button primary"
             disabled={
-              pending || (resuming && (!resumeConfirmed || !reason.trim()))
+              pending ||
+              !authorized ||
+              (resuming && (!resumeConfirmed || !reason.trim()))
             }
           >
             <Save size={18} />

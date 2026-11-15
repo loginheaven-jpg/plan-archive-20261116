@@ -188,7 +188,7 @@ export function newAnnualRow(organizationId: OrganizationId, year: number): Annu
     input: {
       title: "", organizationId, startDate: "", endDate: "", allDay: true,
       startTime: null, endTime: null, audience: "departments", audienceIds: [organizationId],
-      visibility: "members", locationId: null, location: "", description: "", internalNote: "",
+      visibility: "public", locationId: null, location: "", description: "", internalNote: "",
       recurrence: null, status: "confirmed",
     },
   };
