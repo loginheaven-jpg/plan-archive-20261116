@@ -101,3 +101,16 @@
 - 실제 React 격리 모달 검사는 비밀번호 오류 시 이메일 보존/비밀번호 초기화/즉시 재입력, 원래 일정 입력 모드 복귀/화면 이동 없음, 프로필 미완료 신원 자동 연결/비밀번호 폼 없음/편집 제한, 계정 전환 시 이전 비공개 상세 제거의3개 결과 묶음 통과.
 - 단건 입력의 인증 만료/다른 계정/같은 계정 복귀 보존4개, 기존 달력13개, 연간5개 화면 결과도 통과했다. 모든 API 요청을 합성 응답으로 가로채 실제 DB 시험 쓰기와 페이지 오류는0이다.
 - 운영 동반 배포 확인은01:39 별도로 요청했고 아직 승인으로 간주하지 않는다. 소스 검토 브랜치 저장과 관리 버전 저장은 운영 배포와 구별한다. 실제 사용자 계정의 새 운영 SSO 확인은 중앙 v2 운영 반영 후 수행할 별도 작업이다.
+
+# 2026-11-16 08:10 승인 · GitHub main 동기화와 운영 배포
+
+GitHub main은 이전 보완까지였고 최종 모달 SSO는 검토 브랜치에 있었다. 사용자가 최신 동기화와 즉시 운영 배포를 승인하여 두 main을 이력을 보존하는 fast-forward로 갱신했다.
+
+- 중앙 교적부 코드 b6a0ca4234cd2146fad4a10521dd039ee0b2bb39. Git 자동 빌드의 계정 연결 BLOCKED는 현재 승인된 Vercel 연결의 공식 gitSource 배포로 해결했다. 운영 deployment dpl_GvzKRvBLYGHGsiqmNUcNC1DF8oYn READY, 정확한 소스와 production target, saint.yebom.org alias를 확인했다.
+- 실제 유지된 브라우저 중앙 세션 HTTP200, 신원 로그인true, user.auth_contract_version=2, password_reset_required는 boolean, profile_missing_fields는 birth_date/gender/phone이다. 이 계정의 세 필수 항목 미완료를 임의 수정·면제하지 않았다.
+- 일정 최종 운영 버전70c7005b846bb079527c879f6d928a6a959bc86d의 publish 결과가 published 및 https://plan.yebom.org 로 확인됐다. API 건강·익명 열람·연간 입력 페이지·공유 게시판·ICS HTTP200, 익명 입력은 HTTP401 LOGIN_REQUIRED로 먼저 차단된다. 빈 요청은 레코드 생성 이전에 차단되며 실제 회원/프로필/비밀번호/행사 시험 변경은 없다.
+- 운영 반영 직전 일정 검사402개·타입·정적 검사 통과. 중앙 검사98개·두 최종 빌드의 기존 근거는 변함없는 코드이며 사용자 변경을 덮어쓰지 않았다.
+
+현재 GitHub main에 있는 소스는 이 최종 운영 코드와 동일하다. 배포 후 문서만 추가된 main 커밋은 다시 운영에 배포해야 하는 앱 기능 변경이 아니다.
+
+실제 운영 일정 브라우저의 기존 중앙 공유 세션 확인: HTTP200, authenticated=true, identity 존재, state=profile_incomplete, profileCompletionRequired=true, passwordResetRequired=false. 동일한 plan 출처/2027년 화면을 유지하고 열린 비밀번호 입력창은0이다. 이는 신원 자동 SSO 성공이며 사용자 선택의 필수 프로필 제한 때문에 편집은 여전히 차단되는 정상 정책이다.
