@@ -48,6 +48,7 @@ import {
 } from "./workspace";
 import { useUnsavedGuard } from "./useUnsavedGuard";
 import "./annual.css";
+import LoginLink from "@/components/auth/LoginLink";
 
 export default function AnnualApp({
   initialYear,
@@ -555,10 +556,16 @@ export default function AnnualApp({
                 권한이 있는 계정만 개인 초안과 일괄 등록을 사용할 수 있어요.
               </p>
               {!actor && boot?.auth.loginUrl && (
-                <a className="button primary" href={boot.auth.loginUrl}>
+                <LoginLink
+                  className="button primary"
+                  entry={boot.auth.loginUrl}
+                  returnTo={`/annual?year=${workspace.year}${workspace.organizationId ? `&org=${workspace.organizationId}` : ""}`}
+                  target={dirty || parkedDirtyCount > 0 ? "_blank" : undefined}
+                  rel="noopener noreferrer"
+                >
                   <LogIn size={18} />
-                  교회 계정 로그인
-                </a>
+                  로그인
+                </LoginLink>
               )}
             </div>
           </section>

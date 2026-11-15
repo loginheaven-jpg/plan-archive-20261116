@@ -14,15 +14,18 @@ export default function SaintCheckin() {
     if (pathname === "/share") return;
     let active = true;
     let running = false;
-    let lastCheck = 0;
-    let initialized = false;
+    let queued = false;
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
 
-    const check = async (initial = false) => {
-      if (!active || running || (!initial && Date.now() - lastCheck < 60000))
+    const check = async () => {
+      if (!active) return;
+      // A return during an in-flight check must be checked again afterwards.
+      if (running) {
+        queued = true;
         return;
+      }
       running = true;
-      lastCheck = Date.now();
       try {
         const response = await fetch("/api/auth/checkin", {
           credentials: "include",
@@ -45,7 +48,8 @@ export default function SaintCheckin() {
         }
         if (response.ok || response.status === 401 || response.status === 403) {
           const needsAccount =
-            data.state === "not_approved" || data.state === "profile_incomplete";
+            data.state === "not_approved" ||
+            data.state === "profile_incomplete";
           setAccountRequired(needsAccount);
           // The same-origin route supplies sanitized text; React renders it as text.
           setMessage(
@@ -54,9 +58,7 @@ export default function SaintCheckin() {
               : "",
           );
           // A focus refresh never navigates or clears an editor/annual workspace.
-          if (initialized || retry > 0)
-            window.dispatchEvent(new Event("yebom:session-changed"));
-          initialized = true;
+          window.dispatchEvent(new Event("yebom:session-changed"));
         }
       } catch {
         if (active)
@@ -64,22 +66,37 @@ export default function SaintCheckin() {
             "교적부 로그인 확인에 연결하지 못했어요. 입력은 그대로 보관됩니다.",
           );
       } finally {
-        initialized = true;
         running = false;
+        if (active && queued) {
+          queued = false;
+          void check();
+        }
       }
     };
     const onFocus = () => {
-      if (document.visibilityState === "visible") void check();
+      if (document.visibilityState !== "visible") return;
+      // Coalesce focus + visibility events, without suppressing a fast SSO return.
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => void check(), 100);
     };
-    const onCheckSession = () => void check(true);
-    void check(true);
+    const onCheckSession = () => {
+      clearTimeout(focusTimer);
+      void check();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) onCheckSession();
+    };
+    void check();
     window.addEventListener("focus", onFocus);
+    window.addEventListener("pageshow", onPageShow);
     window.addEventListener("yebom:check-session", onCheckSession);
     document.addEventListener("visibilitychange", onFocus);
     return () => {
       active = false;
+      clearTimeout(focusTimer);
       controller.abort();
       window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onPageShow);
       window.removeEventListener("yebom:check-session", onCheckSession);
       document.removeEventListener("visibilitychange", onFocus);
     };

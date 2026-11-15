@@ -6,8 +6,10 @@ import { SAINT_COOKIE, SAINT_MAX_BODY_BYTES, SAINT_SESSION_URL, SAINT_TIMEOUT_MS
 import { GET as checkin } from "../src/app/api/auth/checkin/route";
 import { GET as sso } from "../src/app/api/auth/sso/route";
 import { GET as status } from "../src/app/api/auth/status/route";
+import { GET as bootstrapRoute } from "../src/app/api/bootstrap/route";
 
 vi.mock("../src/db/client", () => ({ getDB: vi.fn() }));
+vi.mock("../src/server/services", () => ({ bootstrap: vi.fn(async (_request: Request, actor: unknown) => ({ actor })) }));
 const origin = "https://plan.yebom.org";
 const password = "isolated-offline-sso-password-at-least-32-characters";
 const currentUser = { user_id: "isolated-user", name: "격리된 교인", is_approved: true, needs_profile_completion: false, finance_role: "super_admin", permission_level: "admin", email: "private@example.invalid", group_id: "private-group", privateignored: "private-claim" };
@@ -264,6 +266,41 @@ describe("safe central cookie propagation and check-in privacy", () => {
 });
 
 describe("SSO entry and non-looping callbacks", () => {
+  it("the initial bootstrap relays central cookie renewal with its current identity", async () => {
+    fetchStub.mockResolvedValue(response(undefined, 200, [deletion, renewed]));
+    mockDB();
+    const result = await bootstrapRoute(req("/api/bootstrap?year=2027"));
+    expect(result.status).toBe(200);
+    expect((await result.json()).actor.id).toBe(currentUser.user_id);
+    expect(result.headers.getSetCookie()).toEqual([deletion, renewed]);
+    expect(fetchStub).toHaveBeenCalledOnce();
+  });
+  it("a forced public bootstrap never checks identity or relays its cookies", async () => {
+    const result = await bootstrapRoute(req("/api/bootstrap?year=2027&public=1"));
+    expect(result.status).toBe(200);
+    expect((await result.json()).actor).toBeNull();
+    expect(result.headers.getSetCookie()).toEqual([]);
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(getDB).not.toHaveBeenCalled();
+  });
+  it("preserves an annual workspace through the common login callback", async () => {
+    const next = "/annual?year=2027&org=children";
+    const entry = await sso(req(`/api/auth/sso?next=${encodeURIComponent(next)}`, null));
+    const login = new URL(entry.headers.get("location")!);
+    const callback = new URL(login.searchParams.get("redirect")!);
+    expect(login.searchParams.get("from")).toBe("plan");
+    expect(callback.searchParams.get("next")).toBe(next);
+    expect(callback.searchParams.get("callback")).toBe("1");
+    mockDB();
+    const completed = await sso(req(callback.pathname + callback.search));
+    expect(completed.status).toBe(303);
+    expect(completed.headers.get("location")).toBe(origin + next);
+  });
+  it.each(["https://evil.invalid", "//evil.invalid", "/api/auth/logout", "/\\evil.invalid"])("an authenticated login cannot redirect to %s", async next => {
+    mockDB();
+    const result = await sso(req(`/api/auth/sso?next=${encodeURIComponent(next)}`));
+    expect(result.headers.get("location")).toBe(origin + "/");
+  });
   it("first anonymous entry redirects only to the real fixed Saint login callback", async () => {
     const result = await sso(req("/api/auth/sso?redirect=https://evil.invalid", null));
     expect(result.status).toBe(303);

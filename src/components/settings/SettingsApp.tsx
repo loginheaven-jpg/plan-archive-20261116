@@ -15,7 +15,8 @@ import {
   Users,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import LoginLink from "@/components/auth/LoginLink";
 import type { MouseEvent } from "react";
 import { ORGANIZATIONS } from "@/domain/organizations";
 import type {
@@ -214,6 +215,10 @@ export default function SettingsApp() {
   const [savingUserId, setSavingUserId] = useState<string | null>(null);
   const [userErrors, setUserErrors] = useState<Record<string, string>>({});
   const [userSuccesses, setUserSuccesses] = useState<Record<string, string>>({});
+  const actorRef = useRef<Actor | null>(null);
+  const authGeneration = useRef(0);
+  const initialLoadComplete = useRef(false);
+  const pendingSessionRefresh = useRef(false);
 
   const isAdmin = actor?.role === "admin";
   const settingsDirty =
@@ -229,6 +234,8 @@ export default function SettingsApp() {
 
   useEffect(() => {
     const controller = new AbortController();
+    const generation = ++authGeneration.current;
+    initialLoadComplete.current = false;
     const options: RequestInit = { signal: controller.signal };
 
     async function load() {
@@ -242,11 +249,12 @@ export default function SettingsApp() {
           `/api/bootstrap?year=${koreaYear()}`,
           options,
         );
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || generation !== authGeneration.current) return;
         if (!isChurchSettings(bootstrap.settings) || !isVenueList(bootstrap.venues)) {
           throw new Error("교회 설정 응답을 확인하지 못했어요. 다시 불러와 주세요.");
         }
         setActor(bootstrap.actor);
+        actorRef.current = bootstrap.actor;
         setAuth(bootstrap.auth);
         setSettings(bootstrap.settings);
         setVenues(bootstrap.venues);
@@ -257,7 +265,7 @@ export default function SettingsApp() {
         const loadSettings = async () => {
           try {
             const response = await fetchJson<SettingsResponse>("/api/settings", options);
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted || generation !== authGeneration.current) return;
             if (!isChurchSettings(response.settings) || !isVenueList(response.venues)) {
               throw new Error("교회 설정 응답을 확인하지 못했어요. 다시 불러와 주세요.");
             }
@@ -275,7 +283,7 @@ export default function SettingsApp() {
           setUsersLoading(true);
           try {
             const response = await fetchJson<UsersResponse>("/api/admin/users", options);
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted || generation !== authGeneration.current) return;
             if (!Array.isArray(response.users) || !response.users.every(isManagedUser)) {
               throw new Error("검증된 사용자 목록 응답을 확인하지 못했어요.");
             }
@@ -292,13 +300,89 @@ export default function SettingsApp() {
       } catch (error: unknown) {
         if (!controller.signal.aborted) setLoadError(errorMessage(error));
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          initialLoadComplete.current = true;
+          if (pendingSessionRefresh.current) {
+            pendingSessionRefresh.current = false;
+            window.dispatchEvent(new Event("yebom:session-changed"));
+          }
+        }
       }
     }
 
     void load();
     return () => controller.abort();
   }, [loadRevision]);
+
+  useEffect(() => {
+    let controller: AbortController | undefined;
+    const refreshSession = async () => {
+      if (!initialLoadComplete.current) {
+        pendingSessionRefresh.current = true;
+        return;
+      }
+      controller?.abort();
+      controller = new AbortController();
+      const signal = controller.signal;
+      const generation = ++authGeneration.current;
+      try {
+        const bootstrap = await fetchJson<Bootstrap>(
+          `/api/bootstrap?year=${koreaYear()}`,
+          { signal },
+        );
+        if (signal.aborted || generation !== authGeneration.current) return;
+        const previous = actorRef.current;
+        actorRef.current = bootstrap.actor;
+        setActor(bootstrap.actor);
+        setAuth(bootstrap.auth);
+        setLoading(false);
+        setLoadError(null);
+        // Refresh identity without discarding an in-progress settings form.
+        if (
+          previous?.id !== bootstrap.actor?.id ||
+          previous?.role !== bootstrap.actor?.role
+        ) {
+          setUsers([]);
+          setSavedUsers([]);
+          setUserErrors({});
+          setUserSuccesses({});
+          if (bootstrap.actor?.role === "admin") {
+            setUsersLoading(true);
+            const result = await fetchJson<UsersResponse>("/api/admin/users", {
+              signal,
+            });
+            if (signal.aborted || generation !== authGeneration.current) return;
+            if (
+              !Array.isArray(result.users) ||
+              !result.users.every(isManagedUser)
+            )
+              throw new Error("사용자 목록 응답을 확인하지 못했어요.");
+            setUsers(result.users);
+            setSavedUsers(result.users);
+          }
+        }
+      } catch (error) {
+        if (!signal.aborted && generation === authGeneration.current) {
+          actorRef.current = null;
+          setActor(null);
+          setUsers([]);
+          setSavedUsers([]);
+          setLoadError(errorMessage(error));
+        }
+      } finally {
+        if (!signal.aborted && generation === authGeneration.current)
+          setUsersLoading(false);
+      }
+    };
+    const onSession = () => void refreshSession();
+    window.addEventListener("yebom:session-changed", onSession);
+    return () => {
+      controller?.abort();
+      window.removeEventListener("yebom:session-changed", onSession);
+    };
+  }, []);
+
 
   useEffect(() => {
     if (!dirty && !saving) return;
@@ -311,6 +395,7 @@ export default function SettingsApp() {
   }, [dirty, saving]);
 
   function confirmNavigation(event: MouseEvent<HTMLAnchorElement>) {
+    if (event.currentTarget.target === "_blank") return;
     if (saving) {
       event.preventDefault();
       window.alert("저장 중이에요. 저장 결과를 확인한 뒤 이동해 주세요.");
@@ -517,17 +602,18 @@ export default function SettingsApp() {
             {auth?.message && <p className="muted">{auth.message}</p>}
             {auth && (!auth.configured || !auth.onSharedDomain) && (
               <div className="alert" role="note">
-                <p>실제 교적부 로그인을 사용하려면 서버의 세션 검증키, 교적부의 허용 복귀 주소와 운영 도메인을 연결해야 해요.</p>
+                <p>교회 계정 로그인을 사용하려면 운영 도메인과 공통 로그인 연결을 확인해야 해요.</p>
                 <p>교적부의 공유 쿠키가 전달되는 도메인에서 확인해야 하며, 다른 도메인의 미리보기만으로 로그인 연결이 완료되지는 않아요.</p>
               </div>
             )}
             {!isAdmin && (
               <p className="muted">최초 일정관리자는 운영자가 검증된 교적부 사용자 식별자로 서버에 지정해야 해요. 이름을 임의로 입력해 사용자를 만들거나 재정 권한으로 자동 승인하지 않아요.</p>
             )}
-            {auth?.loginUrl && (
-              <a className="button" href={auth.loginUrl} onClick={confirmNavigation}>
-                <LogIn size={18} aria-hidden="true" /> 교적부 로그인으로 이동
-              </a>
+            {!actor && auth?.loginUrl && (
+              <LoginLink className="button" entry={auth.loginUrl} onClick={confirmNavigation}
+                target={dirty ? "_blank" : undefined} rel="noopener noreferrer">
+                <LogIn size={18} aria-hidden="true" /> 로그인
+              </LoginLink>
             )}
           </section>
 

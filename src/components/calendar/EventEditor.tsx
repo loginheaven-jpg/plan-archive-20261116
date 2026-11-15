@@ -13,6 +13,7 @@ import Dialog from "./Dialog";
 import RecurrenceFields from "./RecurrenceFields";
 import DateExpressionField from "./DateExpressionField";
 import { Save, UserRound, ChevronDown } from "lucide-react";
+import LoginLink from "@/components/auth/LoginLink";
 
 export type EditScope = "single" | "series";
 function initialInput(
@@ -203,14 +204,13 @@ export default function EventEditor({
               로그인 또는 편집 권한을 다시 확인해 주세요. 작성 중인 입력은
               보관되어 있으며 같은 계정으로 돌아오면 이어 쓸 수 있어요.
             </p>
-            <a
+            <LoginLink
               className="button"
-              href="/api/auth/sso"
               target="_blank"
               rel="noopener noreferrer"
             >
-              새 창에서 교적부 로그인
-            </a>
+              다시 로그인
+            </LoginLink>
             <button
               type="button"
               className="button"

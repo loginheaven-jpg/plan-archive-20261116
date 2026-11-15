@@ -10,6 +10,7 @@ import {
   saintResult,
   type SaintSession,
 } from "../../../../server/saint-session";
+import { safeLoginReturn } from "../../../../domain/login";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,6 +50,9 @@ export async function GET(request: Request) {
       origin,
     );
   const callback = new URL(request.url).searchParams.get("callback") === "1";
+  const returnTo = safeLoginReturn(
+    new URL(request.url).searchParams.get("next"),
+  );
   // An explicit login entry is the only path allowed to ignore the local logout
   // marker; the same Request keeps validation deduplicated through actorFor.
   const session = await saintSessionFor(request, { allowLogoutMarker: true });
@@ -69,7 +73,7 @@ export async function GET(request: Request) {
     const response = new Response(null, {
       status: 303,
       headers: {
-        Location: `${origin}/`,
+        Location: `${origin}${returnTo}`,
         "Cache-Control": "private, no-store",
         "Set-Cookie": `${LOGOUT_MARKER}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
       },
@@ -80,7 +84,10 @@ export async function GET(request: Request) {
     !callback &&
     ["anonymous", "invalid_cookie", "revoked"].includes(session.state)
   ) {
-    const destination = `https://saint.yebom.org/login?from=plan&redirect=${encodeURIComponent(`${origin}/api/auth/sso?callback=1`)}`;
+    const callbackURL = new URL("/api/auth/sso", origin);
+    callbackURL.searchParams.set("callback", "1");
+    if (returnTo !== "/") callbackURL.searchParams.set("next", returnTo);
+    const destination = `https://saint.yebom.org/login?from=plan&redirect=${encodeURIComponent(callbackURL.href)}`;
     return appendSaintCookies(
       new Response(null, {
         status: 303,

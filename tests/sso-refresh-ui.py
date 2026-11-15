@@ -53,11 +53,14 @@ class MockAPI:
         self.hold_drafts = False
         self.pending_boot = []
         self.pending_drafts = []
+        self.hold_checkin = False
+        self.pending_checkins = []
+        self.login_url = None
 
     def bootstrap(self):
         return {"events": [deepcopy(EVENT)], "upcoming": [], "actor": deepcopy(self.actor),
                 "venues": [], "settings": SETTINGS,
-                "auth": {"configured": True, "onSharedDomain": True, "loginUrl": None,
+                "auth": {"configured": True, "onSharedDomain": True, "loginUrl": self.login_url,
                          "message": "격리 로그인 상태"}}
 
     def intercept(self, route, request):
@@ -71,8 +74,13 @@ class MockAPI:
             self.checkins += 1
             message = {"profile_incomplete": "격리 검사: 교적부 프로필 작성을 완료해 주세요.",
                        "not_approved": "격리 검사: 교적부 계정 승인을 요청해 주세요."}.get(self.state, "")
-            fulfill(route, {"authenticated": self.state == "authenticated", "state": self.state,
-                            "message": message}, 403 if message else 200)
+            payload = {"authenticated": self.state == "authenticated", "state": self.state, "message": message}
+            status = 403 if message else 200
+            if self.hold_checkin:
+                self.hold_checkin = False
+                self.pending_checkins.append((route, payload, status))
+            else:
+                fulfill(route, payload, status)
         elif path == "/api/bootstrap":
             payload = self.bootstrap()
             if self.hold_boot:
@@ -93,6 +101,10 @@ class MockAPI:
             fulfill(route, {"changes": []})
         elif path == "/api/trash":
             fulfill(route, {"events": []})
+        elif path == "/api/settings":
+            fulfill(route, {"settings": SETTINGS, "venues": [], "version": 1})
+        elif path == "/api/admin/users":
+            fulfill(route, {"users": []})
         else:
             fulfill(route, {"error": "Unexpected isolated API: " + path}, 404)
             errors.append("Unexpected isolated API: " + path)
@@ -132,17 +144,15 @@ with sync_playwright() as p:
         checks.append(state + " 403 notice and fixed account link coexist with public calendar reads")
         if state == "profile_incomplete":
             before = mock.checkins
-            page.evaluate("window.dispatchEvent(new Event('focus'))")
-            page.wait_for_timeout(100)
-            assert mock.checkins == before, "Ordinary focus must honor 60s throttle"
             mock.state = "authenticated"
             mock.actor = A
-            page.evaluate("window.dispatchEvent(new Event('yebom:check-session'))")
+            page.evaluate("window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange'))")
             pump_until(page, lambda: mock.checkins > before)
             expect(page.get_by_text(text, exact=False)).to_have_count(0)
             page.wait_for_function("window.sessionChanges > 0")
             assert page.url.endswith("/?year=2027&month=11&view=list")
-            checks.append("Explicit check-session bypasses throttle and emits session-changed without navigation")
+            expect(page.locator('.signed-user')).to_contain_text(A['name'])
+            checks.append("Fast focus/visibility return recognizes SSO without a manual check or navigation")
         page.close()
 
     share_mock = MockAPI()
@@ -204,6 +214,60 @@ with sync_playwright() as p:
     expect(initial_drafts.first).to_contain_text("7행")
     assert stale.draft_queries == [B["id"]], stale.draft_queries
     checks.append("Late initial A bootstrap cannot overwrite B or start an obsolete A draft query")
+
+    # The normal login action is one link, with the current page preserved and no dialog.
+    direct = MockAPI(state="anonymous")
+    direct.login_url = "/api/auth/sso"
+    page = new_page(direct)
+    page.goto(BASE + "/?year=2027&month=11&view=list")
+    login = page.get_by_role("link", name="로그인", exact=True)
+    expect(login).to_be_visible()
+    page.wait_for_function("document.querySelector('.login-button').href.includes('year%3D2027')")
+    target = login.get_attribute('href')
+    from urllib.parse import parse_qs, urlsplit
+    assert parse_qs(urlsplit(target).query)['next'] == ['/?year=2027&month=11&view=list']
+    page.route('**/api/auth/sso?**', lambda route: route.fulfill(content_type='text/html; charset=utf-8', body='<h1>격리 공통 로그인 화면</h1>'))
+    count = len(context.pages)
+    login.click()
+    expect(page.get_by_role('heading', name='격리 공통 로그인 화면')).to_be_visible()
+    assert len(context.pages) == count
+    checks.append("Login opens the common screen directly in the same tab and preserves the requested page")
+    page.close()
+
+    # Returning during the first check queues another check instead of dropping it.
+    queued = MockAPI(state="anonymous")
+    queued.hold_checkin = True
+    page = new_page(queued)
+    page.goto(BASE + "/?year=2027&view=list")
+    pump_until(page, lambda: bool(queued.pending_checkins))
+    queued.actor, queued.state = A, "authenticated"
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    page.wait_for_timeout(150)
+    route, payload, status = queued.pending_checkins.pop()
+    fulfill(route, payload, status)
+    expect(page.locator('.signed-user')).to_contain_text(A['name'])
+    assert queued.checkins >= 2
+    checks.append("An in-flight initial check cannot swallow a return from another logged-in app")
+    page.close()
+
+    # Settings must react too, without resetting unsaved settings inputs.
+    admin = {**A, 'role': 'admin'}
+    settings_mock = MockAPI(actor=admin, state='authenticated')
+    page = new_page(settings_mock)
+    page.goto(BASE + '/settings')
+    denomination = page.locator('input').first
+    expect(denomination).to_be_enabled()
+    denomination.fill('격리 미저장 교단 입력')
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    page.wait_for_timeout(250)
+    expect(denomination).to_have_value('격리 미저장 교단 입력')
+    settings_mock.actor, settings_mock.state = None, 'anonymous'
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    expect(page.get_by_text('로그인된 사용자가 없어요.', exact=False)).to_be_visible()
+    expect(denomination).to_be_disabled()
+    expect(denomination).to_have_value('격리 미저장 교단 입력')
+    checks.append("Settings follows login/logout automatically and preserves unsaved settings fields")
+    page.close()
     assert not mutations, mutations
     assert not errors, errors
     context.close()

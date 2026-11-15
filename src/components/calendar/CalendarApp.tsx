@@ -1,5 +1,7 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import LoginLink from "@/components/auth/LoginLink";
+import { planLoginHref } from "@/domain/login";
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -108,13 +110,22 @@ export default function CalendarApp({
   const [prefsReady, setPrefsReady] = useState(false);
   const actor = publicMode ? null : (boot?.actor ?? null);
   const mayCreate = !publicMode && canCreate(actor);
+  const loginReturnTo = `/${publicMode ? "share" : ""}?${new URLSearchParams({ year: String(year), month: String(month + 1), view, ...(detail ? { event: detail.id } : {}) })}`;
   const bootstrapURL = `/api/bootstrap?year=${year}${publicMode ? "&public=1" : ""}`;
-  const reload = useCallback(async () => {
-    const data = await api<Bootstrap>(bootstrapURL);
-    setBoot(data);
-    setLoadError("");
-    return data;
-  }, [bootstrapURL]);
+  const loadGeneration = useRef(0);
+  const reload = useCallback(
+    async (signal?: AbortSignal) => {
+      const generation = ++loadGeneration.current;
+      const data = await api<Bootstrap>(bootstrapURL, { signal });
+      if (!signal?.aborted && generation === loadGeneration.current) {
+        setBoot(data);
+        setLoadError("");
+        setLoading(false);
+      }
+      return data;
+    },
+    [bootstrapURL],
+  );
   useEffect(() => {
     if (publicMode) return;
     const refreshSession = () => {
@@ -131,25 +142,15 @@ export default function CalendarApp({
       window.removeEventListener("yebom:session-changed", refreshSession);
   }, [publicMode, reload]);
   useEffect(() => {
-    let active = true;
-    api<Bootstrap>(bootstrapURL)
-      .then((data) => {
-        if (active) {
-          setBoot(data);
-          setLoadError("");
-          setLoading(false);
-        }
-      })
-      .catch((e) => {
-        if (active) {
-          setLoadError(e.message);
-          setLoading(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [bootstrapURL]);
+    const controller = new AbortController();
+    void reload(controller.signal).catch((e) => {
+      if (!controller.signal.aborted) {
+        setLoadError(e.message);
+        setLoading(false);
+      }
+    });
+    return () => controller.abort();
+  }, [reload]);
   useEffect(() => {
     queueMicrotask(() => {
       try {
@@ -300,6 +301,8 @@ export default function CalendarApp({
   ).find((day) => day.date >= today);
   const openEditor = (date = today) => {
     if (mayCreate) setEditor({ date, scope: "series" });
+    else if (!actor && boot?.auth.loginUrl)
+      window.location.assign(planLoginHref(boot.auth.loginUrl, loginReturnTo));
     else setAuthOpen(true);
   };
   const onDate = (date: string) => {
@@ -634,6 +637,19 @@ export default function CalendarApp({
                 <i>{actor.name.slice(0, 1)}</i>
                 {actor.name}
               </span>
+            ) : publicMode ? null : loading ? (
+              <span className="muted" role="status">
+                로그인 확인 중…
+              </span>
+            ) : boot?.auth.loginUrl ? (
+              <LoginLink
+                className="text-button login-button"
+                entry={boot.auth.loginUrl}
+                returnTo={loginReturnTo}
+              >
+                <LogIn size={17} />
+                로그인
+              </LoginLink>
             ) : (
               <button
                 className="text-button login-button"
@@ -1001,10 +1017,10 @@ export default function CalendarApp({
                 className="button primary"
                 onClick={() => {
                   setEmptyDate(null);
-                  setAuthOpen(true);
+                  openEditor(emptyDate ?? today);
                 }}
               >
-                로그인·입력 안내
+                {actor ? "입력 권한 안내" : "로그인"}
               </button>
             )}
           </div>
@@ -1027,19 +1043,19 @@ export default function CalendarApp({
                   "서버의 로그인 연결 상태를 확인하고 있어요.")}
             </div>
             {boot?.auth.loginUrl && !actor ? (
-              <a
+              <LoginLink
                 className="button primary"
-                href={boot.auth.loginUrl}
-                target="_top"
+                entry={boot.auth.loginUrl}
+                returnTo={loginReturnTo}
               >
                 <LogIn size={18} />
-                교회 로그인으로 이동
-              </a>
+                로그인
+              </LoginLink>
             ) : (
               !actor && (
                 <p className="muted">
-                  운영 도메인·기존 SSO 검증키·최초 일정 관리자 연결이 필요해요.
-                  가상 로그인이나 개발용 관리자 계정을 만들지 않습니다.
+                  운영 도메인과 최초 일정 관리자 연결이 필요해요. 가상
+                  로그인이나 개발용 관리자 계정을 만들지 않습니다.
                 </p>
               )
             )}
