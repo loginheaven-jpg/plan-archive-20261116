@@ -49,9 +49,16 @@ export async function readActor(request: Request): Promise<Actor | null> {
     throw error;
   }
 }
-export async function writeActor(request: Request): Promise<Actor | null> {
+export async function writeActor(request: Request): Promise<Actor> {
   assertCSRF(request);
-  return actorFor(request);
+  const actor = await actorFor(request);
+  if (!actor)
+    throw new APIError(
+      401,
+      "LOGIN_REQUIRED",
+      "일정 입력·수정은 교적부 로그인이 필요해요.",
+    );
+  return actor;
 }
 export function assertUniqueJSONKeys(source: string) {
   const stack: { kind: "object" | "array"; keys: Set<string> }[] = [];
