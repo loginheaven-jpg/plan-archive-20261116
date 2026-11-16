@@ -12,7 +12,7 @@ vi.mock("../src/db/client", () => ({ getDB: vi.fn() }));
 vi.mock("../src/server/services", () => ({ bootstrap: vi.fn(async (_request: Request, actor: unknown) => ({ actor })) }));
 const origin = "https://plan.yebom.org";
 const password = "isolated-offline-sso-password-at-least-32-characters";
-const currentUser = { user_id: "isolated-user", name: "격리된 교인", is_approved: true, needs_profile_completion: false, password_reset_required: false, finance_role: "super_admin", permission_level: "admin", email: "private@example.invalid", group_id: "private-group", privateignored: "private-claim" };
+const currentUser = { user_id: "isolated-user", name: "격리된 교인", is_approved: true, needs_profile_completion: false, password_reset_required: false, finance_role: "super_admin", permission_level: "member", email: "private@example.invalid", group_id: "private-group", privateignored: "private-claim" };
 const fetchStub = vi.fn<typeof fetch>();
 function req(path = "/api/auth/checkin", cookie: string | null = `${SAINT_COOKIE}=opaque-current-seal`, headers: Record<string, string> = {}) {
   return new Request(`${origin}${path}`, { headers: { host: "plan.yebom.org", "sec-fetch-site": "same-origin", ...(cookie === null ? {} : { cookie }), ...headers } });

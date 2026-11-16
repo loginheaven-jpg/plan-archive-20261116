@@ -8,6 +8,7 @@ import { DEFAULT_CHURCH_SETTINGS } from "../domain/church-year";
 import type { Actor, Bootstrap, CalendarEvent, ChangeRecord, ChurchSettings, EventInput, Occurrence, OrganizationId, Venue } from "../domain/types";
 import { APIError, eventInput, occurrencePatch, validateEvent, validDate, type ValidMutation } from "./validation";
 import { authStatus, requireActor, requireAdmin } from "./auth";
+import { refreshAutomaticAccess } from "./automatic-access";
 
 type DB = ReturnType<typeof getDB>;
 export type TX = Parameters<Parameters<DB["transaction"]>[0]>[0];
@@ -132,7 +133,9 @@ export async function writeActor(tx: TX, actor: Actor): Promise<Actor> {
   if (!config) throw new APIError(503, "MIGRATION_REQUIRED", "데이터베이스 초기 설정이 필요합니다.");
   const [current] = await tx.select().from(users).where(eq(users.id, actor.id)).limit(1).for("update");
   if (!current) throw new APIError(401, "AUTH_REQUIRED", "등록된 교적부 사용자 권한을 확인하세요.");
-  return { id: current.id, name: current.name, role: current.role, departmentIds: current.departmentIds };
+  // Reapply only this original server Actor's verified central evidence; never
+  // trust incoming role/source fields or restore stale manual admin grants.
+  return refreshAutomaticAccess(actor, { id: current.id, name: current.name, role: current.role, departmentIds: current.departmentIds });
 }
 async function insertAudit(tx: TX, before: CalendarEvent | null, after: CalendarEvent, actor: Actor, kind: string, reason: string, fields: string[], occurrenceDate?: string) {
   const change: ChangeRecord = { id: randomUUID(), eventId: after.id, title: after.title, organizationId: after.organizationId, kind, at: after.updatedAt ?? after.createdAt, by: { id: actor.id, name: actor.name }, reason, changedFields: fields, before: before ? snapshot(before) : null, after: snapshot(after), ...(occurrenceDate ? { occurrenceDate } : {}) };

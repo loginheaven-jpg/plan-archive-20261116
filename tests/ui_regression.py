@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get('UI_TEST_ORIGIN', 'http://127.0.0.1:3000')
 REPORT = Path('/tmp/yebom-ui-report.json')
-ACTOR = {'id': 'isolated-ui-test', 'name': '격리 검사 담당자', 'role': 'admin', 'departmentIds': ['worship']}
+ACTOR = {'id': 'isolated-ui-test', 'name': '격리 검사 담당자', 'role': os.environ.get('UI_TEST_ROLE', 'admin'), 'departmentIds': os.environ.get('UI_TEST_DEPARTMENTS', 'worship').split(',')}
 SETTINGS = {'denomination': '한국 개신교 · 서방 그레고리력', 'ashWednesday': False, 'ascension': False, 'thanksgiving': {'enabled': False, 'rule': 'nthSunday', 'month': 11, 'nth': 3, 'day': 15}, 'reformationSunday': False, 'newYear': False, 'yearEnd': False}
 
 def event(key, date, title, end=None):

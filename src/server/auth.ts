@@ -5,6 +5,7 @@ import { users, settings } from "../db/schema";
 import type { Actor, AuthStatus, Person } from "../domain/types";
 import { APIError } from "./validation";
 import { cookieValue, saintResult, validateSaintSession, type SaintSession } from "./saint-session";
+import { actorWithAutomaticAccess } from "./automatic-access";
 
 export { SAINT_COOKIE, cookieValue } from "./saint-session";
 export const LOGOUT_MARKER = "yebom_plan_logged_out";
@@ -27,7 +28,7 @@ export function authStatus(request: Request): AuthStatus {
   const configured = !!origin;
   const onSharedDomain = !!origin && current === origin;
   const loginUrl = configured && onSharedDomain ? `${origin}/api/auth/sso` : null;
-  return { configured, onSharedDomain, loginUrl, message: !origin ? "신뢰할 수 있는 운영 HTTPS 주소가 아직 설정되지 않았습니다." : !onSharedDomain ? "Manus Preview 등 다른 도메인에서는 교적부 공유 쿠키를 받을 수 없습니다. 운영 도메인에서 로그인하세요." : "기존 교적부 계정의 현재 세션을 교적부 서버에서 확인합니다. 공유 쿠키 도메인 .yebom.org가 필요하며 일정 권한은 별도로 부여됩니다." };
+  return { configured, onSharedDomain, loginUrl, message: !origin ? "신뢰할 수 있는 운영 HTTPS 주소가 아직 설정되지 않았습니다." : !onSharedDomain ? "Manus Preview 등 다른 도메인에서는 교적부 공유 쿠키를 받을 수 없습니다. 운영 도메인에서 로그인하세요." : "기존 교적부 계정의 현재 세션을 교적부 서버에서 확인합니다. 공유 쿠키 도메인 .yebom.org가 필요하며 중앙 OR 자동 편집 기준과 별도 부서 권한으로 일정 권한을 확인합니다." };
 }
 // Legacy seal inspection is retained only for offline interoperability tests.
 // Active authentication must never call it, including on a central outage.
@@ -68,7 +69,7 @@ export async function actorFor(request: Request, options: AuthOptions = {}): Pro
     await tx.select({ id: settings.id }).from(settings).where(eq(settings.id, "church")).limit(1).for("update");
     await tx.insert(users).values({ ...person, role: adminIds.has(person.id) ? "admin" : "viewer", departmentIds: [], lastSeenAt: new Date().toISOString() }).onDuplicateKeyUpdate({ set: { name: person.name, lastSeenAt: new Date().toISOString() } });
     const [user] = await tx.select().from(users).where(eq(users.id, person.id)).limit(1);
-    return { id: user.id, name: user.name, role: user.role, departmentIds: user.departmentIds };
+    return actorWithAutomaticAccess(person, { id: user.id, name: user.name, role: user.role, departmentIds: user.departmentIds });
   });
 }
 export function requireActor(actor: Actor | null): Actor {

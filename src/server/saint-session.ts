@@ -1,4 +1,4 @@
-import type { Person } from "../domain/types";
+import { ORGANIZATION_IDS, type Actor, type Person } from "../domain/types";
 import type { ClientAuthSession, ProfileField } from "../domain/auth";
 
 export const SAINT_COOKIE = "saint_record_session";
@@ -21,7 +21,7 @@ export interface SaintSession {
   profileMissingFields: ProfileField[];
 }
 const messages: Record<SaintState, string> = {
-  authenticated: "교적부의 현재 승인된 세션을 확인했습니다. 일정 권한은 별도로 부여됩니다.",
+  authenticated: "교적부의 현재 승인된 세션을 확인했습니다. 중앙 OR 자동 편집 기준과 별도 부서 권한으로 일정 권한을 확인합니다.",
   anonymous: "교적부 로그인이 확인되지 않습니다. 교적부 운영 쿠키 도메인이 .yebom.org로 설정되어 있어야 예봄일정과 로그인을 공유할 수 있습니다.",
   invalid_cookie: "공유 로그인 쿠키가 중복되었거나 올바르지 않습니다. 교적부에서 다시 로그인하고 쿠키 도메인 .yebom.org 설정을 확인하세요.",
   revoked: "교적부에서 세션이 취소되었거나 계정이 삭제되었습니다. 교적부에서 다시 로그인하세요.",
@@ -39,6 +39,23 @@ export function saintResult(state: SaintState, person: Person | null = null, set
 export function clientAuthSession(session: SaintSession): ClientAuthSession {
   const authenticated = !!session.person && ["authenticated", "profile_incomplete", "password_reset_required"].includes(session.state);
   return { authenticated, state: session.state, identity: authenticated ? session.person : null, profileCompletionRequired: session.profileCompletionRequired, passwordResetRequired: session.passwordResetRequired, profileMissingFields: session.profileMissingFields, message: session.message };
+}
+
+// Only check() below records evidence, after ALL current central session gates.
+// No exported grant setter/getter and no raw roles or PII on Person/client DTOs.
+const automaticPeople = new WeakMap<Person, { id: string; editor: boolean }>();
+const automaticPermissions = new Set(["super_admin", "admin", "shepherd", "caretaker", "pastor"]);
+
+/** Server composition operation, not a public claim/eligibility getter. */
+export function actorWithSaintAccess(person: Person | null, manual: Actor): Actor {
+  const evidence = person ? automaticPeople.get(person) : undefined;
+  const automaticEditor = !!person && person.id === manual.id && evidence?.id === manual.id && evidence.editor;
+  return {
+    id: manual.id, name: manual.name,
+    // Automatic access never becomes service-settings/user-management admin.
+    role: manual.role === "admin" ? "admin" : automaticEditor ? "editor" : manual.role,
+    departmentIds: automaticEditor && manual.role !== "admin" ? [...ORGANIZATION_IDS] : [...manual.departmentIds],
+  };
 }
 
 /** Raw singleton values only: never decode a cookie into a new header delimiter. */
@@ -163,7 +180,13 @@ async function check(request: Request): Promise<SaintSession> {
       const person = { id: user.user_id, name: user.name.trim() };
       if (flags.passwordResetRequired) return saintResult("password_reset_required", person, setCookies, flags);
       if (flags.profileCompletionRequired) return saintResult("profile_incomplete", person, setCookies, flags);
-      // Deliberately ignore email, finance_role, permissions and every private claim.
+      // Exact OR of CURRENT official user fields, not cookie/legacy claims or an
+      // inferred finance hierarchy. Malformed/missing roles cannot add access.
+      automaticPeople.set(person, {
+        id: person.id,
+        editor: (typeof user.permission_level === "string" && automaticPermissions.has(user.permission_level)) || user.finance_role === "deacon",
+      });
+      // Retain only the private boolean; raw roles/email never enter identity DTOs.
       return saintResult("authenticated", person, setCookies, flags);
     })()]);
   } catch { return saintResult("unavailable"); }
